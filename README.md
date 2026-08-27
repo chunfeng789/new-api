@@ -102,6 +102,59 @@ docker run --name new-api -d --restart always \
 > [!WARNING]
 > 多机部署时，所有节点必须使用同一主数据库与相同的 `SESSION_SECRET`；共享 Redis 的节点还需使用相同的 `CRYPTO_SECRET`，否则鉴权与缓存无法一致。
 
+## 🛠️ 开发
+
+### 环境要求
+
+| 依赖 | 版本 |
+|------|------|
+| Go | ≥ 1.25.1 |
+| Bun | 1.4.0（前端包管理与运行）|
+| Docker | 用于本地数据库（PostgreSQL）|
+
+### 快速开始
+
+```bash
+# 启动本地依赖（PostgreSQL + 后端，基于 docker-compose.dev.yml）
+make dev-api
+
+# 启动前端开发服务器（http://localhost:5173）
+make dev-web
+
+# 或一步启动前后端
+make dev
+```
+
+也可以手动分别启动：
+
+```bash
+# 前端
+cd web && bun install && bun run dev
+
+# 后端
+go run main.go
+```
+
+### 构建
+
+前端会构建到 `web/dist`，并由 Go 二进制内嵌打包：
+
+```bash
+make build-web   # 构建前端
+make start-api   # 启动后端（等价于 go run main.go）
+
+# 或一次性构建前端并启动后端
+make all
+```
+
+### 测试与检查
+
+```bash
+make test                     # 测试 root 与 relaykit 两个 Go 模块
+cd web && bun run test        # 前端单元测试
+cd web && bun run typecheck   # 前端类型检查
+```
+
 ## 📜 开源协议
 
 本项目基于 [GNU AGPLv3](./LICENSE) 开源。
