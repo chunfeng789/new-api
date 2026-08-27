@@ -201,7 +201,7 @@ git push origin v1.0.1
 | Workflow | 触发范围 | 产物 |
 |----------|----------|------|
 | `docker-build.yml` | 除 `nightly*` 外的所有 tag | 多架构镜像（amd64/arm64）推送到私有仓库 `registry.cn-hongkong.aliyuncs.com/catalyst_clan/new-api:<tag>`，并更新 `latest`，附 cosign 签名 |
-| `release.yml` | 除 `*-alpha*` 外的所有 tag | Linux/macOS/Windows 二进制 + GitHub Release，Release 说明为从提交自动生成的 changelog |
+| `release.yml` | 除 `*-alpha*` 外的所有 tag | Linux/macOS 二进制 + GitHub Release，Release 说明为从提交自动生成的 changelog |
 
 > 💡 `-alpha` 预发布只会构建 Docker 镜像，不会发布 GitHub Release。
 
