@@ -165,14 +165,19 @@ cd web && bun run typecheck   # 前端类型检查
 
 ### 创建并推送新版本
 
+推荐使用发布脚本 [`release.sh`](./release.sh)，它会校验工作区、生成版本号、预览 changelog，并打 tag、推送：
+
 ```bash
-# 1. 拉取最新 main
+./release.sh v1.0.1     # 指定版本
+./release.sh patch      # 从最新 vX.Y.Z 自动递增（patch / minor / major）
+./release.sh            # 交互式输入
+```
+
+或手动执行：
+
+```bash
 git checkout main && git pull
-
-# 2. 打 tag（示例：v1.0.1）
 git tag v1.0.1
-
-# 3. 推送 tag，触发构建
 git push origin v1.0.1
 ```
 
@@ -181,7 +186,7 @@ git push origin v1.0.1
 | Workflow | 触发范围 | 产物 |
 |----------|----------|------|
 | `docker-build.yml` | 除 `nightly*` 外的所有 tag | 多架构镜像（amd64/arm64）推送到私有仓库 `registry.cn-hongkong.aliyuncs.com/catalyst_clan/new-api:<tag>`，并更新 `latest`，附 cosign 签名 |
-| `release.yml` | 除 `*-alpha*` 外的所有 tag | Linux/macOS/Windows 二进制 + GitHub Release |
+| `release.yml` | 除 `*-alpha*` 外的所有 tag | Linux/macOS/Windows 二进制 + GitHub Release，Release 说明为从提交自动生成的 changelog |
 
 > 💡 `-alpha` 预发布只会构建 Docker 镜像，不会发布 GitHub Release。
 
