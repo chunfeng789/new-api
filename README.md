@@ -155,6 +155,45 @@ cd web && bun run test        # 前端单元测试
 cd web && bun run typecheck   # 前端类型检查
 ```
 
+## 🚢 发布
+
+发布完全由 **git tag** 驱动：创建并推送一个版本 tag，即会自动触发 GitHub Actions 构建。版本号无需手动改文件，CI 会用 tag 名写入 `VERSION` 并注入二进制。
+
+### 版本号规范
+
+采用语义化版本 `vX.Y.Z`，预发布可加后缀，例如 `v1.0.1`、`v1.0.0-rc.1`、`v1.0.0-alpha.1`。
+
+### 创建并推送新版本
+
+```bash
+# 1. 拉取最新 main
+git checkout main && git pull
+
+# 2. 打 tag（示例：v1.0.1）
+git tag v1.0.1
+
+# 3. 推送 tag，触发构建
+git push origin v1.0.1
+```
+
+### 推送 tag 会触发
+
+| Workflow | 触发范围 | 产物 |
+|----------|----------|------|
+| `docker-build.yml` | 除 `nightly*` 外的所有 tag | 多架构镜像（amd64/arm64）推送到私有仓库 `registry.cn-hongkong.aliyuncs.com/catalyst_clan/new-api:<tag>`，并更新 `latest`，附 cosign 签名 |
+| `release.yml` | 除 `*-alpha*` 外的所有 tag | Linux/macOS/Windows 二进制 + GitHub Release |
+
+> 💡 `-alpha` 预发布只会构建 Docker 镜像，不会发布 GitHub Release。
+
+### 手动触发
+
+也可在 GitHub → **Actions → Publish Docker image (Multi-arch) → Run workflow**，输入一个**已存在**的 tag 重新构建镜像。
+
+> [!IMPORTANT]
+> 首次发布前，需在仓库 **Settings → Secrets and variables → Actions** 配置以下密钥，否则推送私有仓库会失败：
+> - `ALIYUN_REGISTRY_USERNAME` — 阿里云容器镜像仓库用户名
+> - `ALIYUN_REGISTRY_PASSWORD` — 对应密码/访问凭证
+
 ## 📜 开源协议
 
 本项目基于 [GNU AGPLv3](./LICENSE) 开源。
