@@ -19,7 +19,10 @@ fi
 
 PREV_TAG="${2:-}"
 if [ -z "$PREV_TAG" ]; then
-  PREV_TAG="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+  # Describe from TAG itself (not TAG^) while excluding TAG, so a prerelease tag
+  # sharing TAG's commit (e.g. promoting v1.0.0-rc.N to v1.0.0 without new
+  # commits) is chosen as the predecessor instead of an older tag.
+  PREV_TAG="$(git describe --tags --abbrev=0 --exclude="$TAG" "$TAG" 2>/dev/null || true)"
 fi
 
 if [ -n "$PREV_TAG" ]; then

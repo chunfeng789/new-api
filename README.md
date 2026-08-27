@@ -6,6 +6,43 @@
 
 🍥 新一代大模型网关与 AI 资产管理系统
 
+<p align="center">
+  <a href="./README.zh_CN.md">简体中文</a> |
+  <a href="./README.zh_TW.md">繁體中文</a> |
+  <a href="./README.en.md">English</a> |
+  <a href="./README.fr.md">Français</a> |
+  <a href="./README.ja.md">日本語</a>
+</p>
+
+<p align="center">
+  <a href="https://raw.githubusercontent.com/Calcium-Ion/new-api/main/LICENSE">
+    <img src="https://img.shields.io/github/license/Calcium-Ion/new-api?color=brightgreen" alt="license">
+  </a><!--
+  --><a href="https://github.com/Calcium-Ion/new-api/releases/latest">
+    <img src="https://img.shields.io/github/v/release/Calcium-Ion/new-api?color=brightgreen&include_prereleases" alt="release">
+  </a><!--
+  --><a href="https://hub.docker.com/r/CalciumIon/new-api">
+    <img src="https://img.shields.io/badge/docker-dockerHub-blue" alt="docker">
+  </a>
+  <a href="https://atomgit.com/QuantumNous/new-api" target="_blank">
+    <img alt="AtomGit G-Star" src="https://atomgit.com/QuantumNous/new-api/star/badge.svg"/>
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://trendshift.io/repositories/20180" target="_blank">
+    <img src="https://trendshift.io/api/badge/repositories/20180" alt="QuantumNous%2Fnew-api | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
+  </a>
+  <br>
+  <a href="https://hellogithub.com/repository/QuantumNous/new-api" target="_blank">
+    <img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=539ac4217e69431684ad4a0bab768811&claim_uid=tbFPfKIDHpc4TzR" alt="Featured｜HelloGitHub" style="width: 250px; height: 54px;" width="250" height="54" />
+  </a><!--
+  -->
+  <a href="https://atomgit.com/QuantumNous/new-api" target="_blank">
+    <img alt="AtomGit G-Star" src="https://atomgit.com/QuantumNous/new-api/star/new_badge.svg" width="250" height="55" />
+  </a>
+</p>
+
 </div>
 
 ---
@@ -200,7 +237,7 @@ git push origin v1.0.1
 
 | Workflow | 触发范围 | 产物 |
 |----------|----------|------|
-| `docker-build.yml` | 除 `nightly*` 外的所有 tag | 多架构镜像（amd64/arm64）推送到私有仓库 `registry.cn-hongkong.aliyuncs.com/catalyst_clan/new-api:<tag>`，并更新 `latest`，附 cosign 签名 |
+| `docker-build.yml` | 除 `nightly*` 外的所有 tag | 多架构镜像（amd64/arm64）推送到私有仓库 `registry.cn-hongkong.aliyuncs.com/catalyst_clan/new-api:<tag>`，并更新 `latest` |
 | `release.yml` | 除 `*-alpha*` 外的所有 tag | Linux/macOS 二进制 + GitHub Release，Release 说明为从提交自动生成的 changelog |
 
 > 💡 `-alpha` 预发布只会构建 Docker 镜像，不会发布 GitHub Release。
@@ -214,6 +251,11 @@ git push origin v1.0.1
 > - `ALIYUN_REGISTRY_USERNAME` — 阿里云容器镜像仓库用户名
 > - `ALIYUN_REGISTRY_PASSWORD` — 对应密码/访问凭证
 
+## 📚 文档
+
+- 官方文档：<https://docs.newapi.pro/docs>
+- DeepWiki：[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/QuantumNous/new-api)
+
 ## 📜 开源协议
 
 本项目基于 [GNU AGPLv3](./LICENSE) 开源。
@@ -221,6 +263,14 @@ git push origin v1.0.1
 依据 AGPLv3 第 7 条附加条款：修改版本必须在相应法律声明，以及界面中显著的关于、法律、页脚或署名位置，保留作者署名 `Frontend design and development by New API contributors.`，并保留指向原始项目的可见链接：<https://github.com/QuantumNous/new-api>。
 
 本项目基于 [One API](https://github.com/songquanpeng/one-api)（MIT 协议）二次开发。
+
+## 🌟 Star History
+
+<div align="center">
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Calcium-Ion/new-api&type=Date)](https://star-history.com/#Calcium-Ion/new-api&Date)
+
+</div>
 
 ---
 
