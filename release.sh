@@ -5,10 +5,10 @@
 #
 # Usage:
 #   ./release.sh v1.0.1            # explicit version
-#   ./release.sh patch             # bump patch from the latest vX.Y.Z tag
-#   ./release.sh minor             # bump minor
-#   ./release.sh major             # bump major
-#   ./release.sh                   # interactive prompt
+#   ./release.sh patch             # bump patch from the latest tag (also: minor, major)
+#   ./release.sh release           # promote the latest pre-release to a stable release
+#   ./release.sh rc                # next pre-release (e.g. v1.0.0-rc.27)
+#   ./release.sh                   # interactive menu of suggestions
 #
 # Options:
 #   -y, --yes    do not ask for confirmation
@@ -50,36 +50,76 @@ git fetch --tags --quiet "$REMOTE"
 
 VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
 
-latest_stable_tag() {
-  git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
-}
+# Parse the latest tag into base (X.Y.Z) + prerelease (e.g. rc.26) and compute
+# the suggested next versions following semantic versioning.
+LATEST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+core="${LATEST_TAG#v}"
+base="${core%%-*}"
+if [ "$core" = "$base" ]; then pre=""; else pre="${core#*-}"; fi
+if ! printf '%s' "$base" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  base="0.0.0"; pre=""
+fi
+IFS='.' read -r MA MI PA <<< "$base"
 
-bump_version() {
-  local part="$1" latest major minor patch
-  latest="$(latest_stable_tag)"
-  [ -z "$latest" ] && latest="v0.0.0"
-  IFS='.' read -r major minor patch <<< "${latest#v}"
-  case "$part" in
-    major) major=$((major + 1)); minor=0; patch=0 ;;
-    minor) minor=$((minor + 1)); patch=0 ;;
-    patch) patch=$((patch + 1)) ;;
+NEXT_PATCH="v${MA}.${MI}.$((PA + 1))"
+NEXT_MINOR="v${MA}.$((MI + 1)).0"
+NEXT_MAJOR="v$((MA + 1)).0.0"
+RELEASE="v${base}" # drop any prerelease suffix
+
+# Next pre-release: bump the trailing number of the current prerelease, or start
+# an rc series on the next patch when the latest tag is already a stable release.
+if [ -n "$pre" ] && [[ "$pre" =~ ^([0-9A-Za-z]+)\.([0-9]+)$ ]]; then
+  NEXT_PRE="v${base}-${BASH_REMATCH[1]}.$((BASH_REMATCH[2] + 1))"
+elif [ -n "$pre" ]; then
+  NEXT_PRE="v${base}-${pre}.1"
+else
+  NEXT_PRE="${NEXT_PATCH}-rc.1"
+fi
+
+resolve_keyword() {
+  case "$1" in
+    patch) printf '%s' "$NEXT_PATCH" ;;
+    minor) printf '%s' "$NEXT_MINOR" ;;
+    major) printf '%s' "$NEXT_MAJOR" ;;
+    release) printf '%s' "$RELEASE" ;;
+    rc | pre | prerelease) printf '%s' "$NEXT_PRE" ;;
+    *) return 1 ;;
   esac
-  printf 'v%s.%s.%s' "$major" "$minor" "$patch"
 }
 
-case "$VERSION_ARG" in
-  major|minor|patch)
-    NEW_VERSION="$(bump_version "$VERSION_ARG")"
-    ;;
-  "")
-    LATEST_ANY="$(git describe --tags --abbrev=0 2>/dev/null || echo '(none)')"
-    echo "Latest tag: $LATEST_ANY"
+if [ -n "$VERSION_ARG" ]; then
+  NEW_VERSION="$(resolve_keyword "$VERSION_ARG")" || NEW_VERSION="$VERSION_ARG"
+else
+  # Interactive menu of suggestions derived from the latest tag.
+  echo "Latest tag: ${LATEST_TAG:-(none)}"
+  MENU_V=(); MENU_L=()
+  if [ -n "$pre" ]; then
+    MENU_V+=("$NEXT_PRE");   MENU_L+=("next pre-release")
+    MENU_V+=("$RELEASE");    MENU_L+=("promote to release")
+    MENU_V+=("$NEXT_PATCH"); MENU_L+=("patch")
+    MENU_V+=("$NEXT_MINOR"); MENU_L+=("minor")
+    MENU_V+=("$NEXT_MAJOR"); MENU_L+=("major")
+  else
+    MENU_V+=("$NEXT_PATCH"); MENU_L+=("patch")
+    MENU_V+=("$NEXT_MINOR"); MENU_L+=("minor")
+    MENU_V+=("$NEXT_MAJOR"); MENU_L+=("major")
+    MENU_V+=("$NEXT_PRE");   MENU_L+=("pre-release (rc.1)")
+  fi
+  echo "Select the new version:"
+  n=${#MENU_V[@]}
+  for i in "${!MENU_V[@]}"; do
+    printf '  %d) %-18s %s\n' "$((i + 1))" "${MENU_V[$i]}" "${MENU_L[$i]}"
+  done
+  printf '  %d) custom (enter manually)\n' "$((n + 1))"
+  read -r -p "Choice [1-$((n + 1))]: " choice
+  if [ "$choice" = "$((n + 1))" ]; then
     read -r -p "New version (e.g. v1.0.1): " NEW_VERSION
-    ;;
-  *)
-    NEW_VERSION="$VERSION_ARG"
-    ;;
-esac
+  elif printf '%s' "$choice" | grep -qE '^[0-9]+$' && [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ]; then
+    NEW_VERSION="${MENU_V[$((choice - 1))]}"
+  else
+    die "invalid choice: $choice"
+  fi
+fi
 
 [[ "$NEW_VERSION" =~ $VERSION_RE ]] || die "invalid version '$NEW_VERSION' (expected vX.Y.Z or vX.Y.Z-suffix)"
 
