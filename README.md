@@ -168,9 +168,24 @@ cd web && bun run typecheck   # 前端类型检查
 推荐使用发布脚本 [`release.sh`](./release.sh)，它会校验工作区、生成版本号、预览 changelog，并打 tag、推送：
 
 ```bash
+./release.sh            # 交互式菜单：根据最新 tag 给出候选版本
 ./release.sh v1.0.1     # 指定版本
-./release.sh patch      # 从最新 vX.Y.Z 自动递增（patch / minor / major）
-./release.sh            # 交互式输入
+./release.sh patch      # 从最新 tag 递增（patch / minor / major）
+./release.sh release    # 将最新预发布提升为正式版（如 v1.0.0-rc.26 → v1.0.0）
+./release.sh rc         # 下一个预发布（如 v1.0.0-rc.26 → v1.0.0-rc.27）
+```
+
+无参数运行时会按语义化版本给出候选项，例如当前最新为 `v1.0.0-rc.26` 时：
+
+```text
+Latest tag: v1.0.0-rc.26
+Select the new version:
+  1) v1.0.0-rc.27       next pre-release
+  2) v1.0.0             promote to release
+  3) v1.0.1             patch
+  4) v1.1.0             minor
+  5) v2.0.0             major
+  6) custom (enter manually)
 ```
 
 或手动执行：
