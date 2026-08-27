@@ -6,7 +6,9 @@
 #
 # When previous-tag is omitted it is resolved as the nearest tag before <tag>.
 # The changelog (Markdown) is printed to stdout so callers can redirect it into
-# a release body. Repo is taken from $GITHUB_REPOSITORY, or the origin remote.
+# a release body. Each entry links its commit hash to the commit page; GitHub
+# additionally auto-links any #NNNN issue/PR references in the subject. Repo is
+# taken from $GITHUB_REPOSITORY, or the origin remote.
 set -euo pipefail
 
 TAG="${1:-}"
@@ -31,17 +33,33 @@ if [ -n "$PREV_TAG" ] && [ "$(git rev-list --count "$RANGE" 2>/dev/null || echo 
   exit 0
 fi
 
+REPO="${GITHUB_REPOSITORY:-}"
+if [ -z "$REPO" ]; then
+  url="$(git config --get remote.origin.url || true)"
+  REPO="$(printf '%s' "$url" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
+fi
+
+# Read "subject|short|full" lines from stdin and print one Markdown bullet each,
+# linking the short hash to its commit page when the repo slug is known.
+format_lines() {
+  while IFS='|' read -r subject short full; do
+    [ -z "$subject" ] && continue
+    if [ -n "$REPO" ]; then
+      printf -- '- %s ([%s](https://github.com/%s/commit/%s))\n' "$subject" "$short" "$REPO" "$full"
+    else
+      printf -- '- %s (%s)\n' "$subject" "$short"
+    fi
+  done
+}
+
 # Print a section for commits whose subject starts with the given type(s).
 emit_section() {
   local title="$1" type_re="$2" matched
-  matched="$(git log --no-merges --pretty=format:'%s|%h' "$RANGE" \
+  matched="$(git log --no-merges --pretty=format:'%s|%h|%H' "$RANGE" \
     | grep -iE "^(${type_re})(\([^)]*\))?!?:" || true)"
   [ -z "$matched" ] && return 0
   printf '### %s\n\n' "$title"
-  while IFS='|' read -r subject hash; do
-    [ -z "$subject" ] && continue
-    printf -- '- %s (%s)\n' "$subject" "$hash"
-  done <<< "$matched"
+  printf '%s\n' "$matched" | format_lines
   printf '\n'
 }
 
@@ -54,24 +72,14 @@ emit_section "👷 Build & CI"     "build|ci"
 emit_section "📦 Chores"         "chore"
 
 # Anything that is not one of the grouped conventional types.
-others="$(git log --no-merges --pretty=format:'%s|%h' "$RANGE" \
+others="$(git log --no-merges --pretty=format:'%s|%h|%H' "$RANGE" \
   | grep -ivE '^(feat|fix|perf|refactor|docs|build|ci|chore)(\([^)]*\))?!?:' || true)"
 if [ -n "$others" ]; then
   printf '### 🔧 Other Changes\n\n'
-  while IFS='|' read -r subject hash; do
-    [ -z "$subject" ] && continue
-    printf -- '- %s (%s)\n' "$subject" "$hash"
-  done <<< "$others"
+  printf '%s\n' "$others" | format_lines
   printf '\n'
 fi
 
-if [ -n "$PREV_TAG" ]; then
-  repo="${GITHUB_REPOSITORY:-}"
-  if [ -z "$repo" ]; then
-    url="$(git config --get remote.origin.url || true)"
-    repo="$(printf '%s' "$url" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
-  fi
-  if [ -n "$repo" ]; then
-    printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$repo" "$PREV_TAG" "$TAG"
-  fi
+if [ -n "$PREV_TAG" ] && [ -n "$REPO" ]; then
+  printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$REPO" "$PREV_TAG" "$TAG"
 fi
