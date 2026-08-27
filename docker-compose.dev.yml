@@ -45,7 +45,7 @@ services:
       - dev-network
 
   redis:
-    image: redis:7-alpine
+    image: redis:8.10.1
     container_name: new-api-dev-redis
     restart: unless-stopped
     volumes:
@@ -54,7 +54,7 @@ services:
       - dev-network
 
   postgres:
-    image: postgres:15-alpine
+    image: postgres:15.19
     container_name: new-api-dev-pg
     restart: unless-stopped
     environment:
