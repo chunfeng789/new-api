@@ -196,8 +196,12 @@ func main() {
 
 	// 设置路由
 	router.SetRouter(server, router.WebAssets{
-		BuildFS:   buildFS,
-		IndexPage: indexPage,
+		BuildFS:                     buildFS,
+		IndexPage:                   indexPage,
+		CloudflareWebAnalyticsToken: os.Getenv("CLOUDFLARE_WEB_ANALYTICS_TOKEN"),
+		CloudflareWebAnalyticsHostTokens: parseCloudflareWebAnalyticsHostTokens(
+			os.Getenv("CLOUDFLARE_WEB_ANALYTICS_HOST_TOKENS"),
+		),
 	})
 	var port = os.Getenv("PORT")
 	if port == "" {
@@ -279,6 +283,20 @@ func InjectGoogleAnalytics() {
 	analyticsInject := []byte(analyticsInjectBuilder.String())
 	placeholder := []byte("<!--Google Analytics-->\n")
 	indexPage = bytes.ReplaceAll(indexPage, placeholder, analyticsInject)
+}
+
+func parseCloudflareWebAnalyticsHostTokens(config string) map[string]string {
+	hostTokens := make(map[string]string)
+	for entry := range strings.SplitSeq(config, ",") {
+		host, token, ok := strings.Cut(entry, "=")
+		host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+		token = strings.TrimSpace(token)
+		if !ok || host == "" || token == "" {
+			continue
+		}
+		hostTokens[host] = token
+	}
+	return hostTokens
 }
 
 func InitResources() error {

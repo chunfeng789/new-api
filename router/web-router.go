@@ -1,7 +1,9 @@
 package router
 
 import (
+	"bytes"
 	"embed"
+	"net"
 	"net/http"
 	"strings"
 
@@ -15,8 +17,10 @@ import (
 
 // WebAssets holds the embedded dashboard frontend assets.
 type WebAssets struct {
-	BuildFS   embed.FS
-	IndexPage []byte
+	BuildFS                          embed.FS
+	IndexPage                        []byte
+	CloudflareWebAnalyticsToken      string
+	CloudflareWebAnalyticsHostTokens map[string]string
 }
 
 func SetWebRouter(router *gin.Engine, assets WebAssets) {
@@ -33,6 +37,57 @@ func SetWebRouter(router *gin.Engine, assets WebAssets) {
 			return
 		}
 		c.Header("Cache-Control", "no-cache")
-		c.Data(http.StatusOK, "text/html; charset=utf-8", assets.IndexPage)
+		analyticsToken := cloudflareWebAnalyticsTokenForHost(
+			c.Request.Host,
+			assets.CloudflareWebAnalyticsToken,
+			assets.CloudflareWebAnalyticsHostTokens,
+		)
+		c.Data(
+			http.StatusOK,
+			"text/html; charset=utf-8",
+			injectCloudflareWebAnalytics(assets.IndexPage, analyticsToken),
+		)
 	})
+}
+
+func cloudflareWebAnalyticsTokenForHost(requestHost string, defaultToken string, hostTokens map[string]string) string {
+	if len(hostTokens) == 0 {
+		return defaultToken
+	}
+
+	host := requestHost
+	if parsedHost, _, err := net.SplitHostPort(requestHost); err == nil {
+		host = parsedHost
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+
+	matchedHostLength := -1
+	matchedToken := ""
+	for configuredHost, token := range hostTokens {
+		if host != configuredHost && !strings.HasSuffix(host, "."+configuredHost) {
+			continue
+		}
+		if len(configuredHost) > matchedHostLength {
+			matchedHostLength = len(configuredHost)
+			matchedToken = token
+		}
+	}
+	return matchedToken
+}
+
+func injectCloudflareWebAnalytics(indexPage []byte, token string) []byte {
+	analyticsInjectBuilder := &strings.Builder{}
+	if token != "" {
+		analyticsInjectBuilder.WriteString("<!-- Cloudflare Web Analytics -->\n")
+		analyticsInjectBuilder.WriteString("<script type=\"module\" src=\"https://static.cloudflareinsights.com/beacon.min.js\" data-cf-beacon='{\"token\":\"")
+		analyticsInjectBuilder.WriteString(token)
+		analyticsInjectBuilder.WriteString("\"}'></script>\n")
+		analyticsInjectBuilder.WriteString("<!-- End Cloudflare Web Analytics -->\n")
+	}
+	analyticsInjectBuilder.WriteString("<!--Cloudflare Web Analytics QuantumNous-->\n")
+	return bytes.ReplaceAll(
+		indexPage,
+		[]byte("<!--Cloudflare Web Analytics-->\n"),
+		[]byte(analyticsInjectBuilder.String()),
+	)
 }
