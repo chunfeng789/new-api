@@ -26,6 +26,23 @@ type WebAssets struct {
 func SetWebRouter(router *gin.Engine, assets WebAssets) {
 	frontendFS := common.EmbedFolder(assets.BuildFS, "web/dist")
 
+	// Pre-render the index page for every token that can be served so the SPA
+	// fallback only does a host lookup per request instead of rebuilding and
+	// copying the whole page each time. The empty-token entry is the no-beacon
+	// page served when a host is unconfigured or analytics is disabled.
+	indexPage := assets.IndexPage
+	defaultToken := assets.CloudflareWebAnalyticsToken
+	hostTokens := assets.CloudflareWebAnalyticsHostTokens
+	injectedPages := map[string][]byte{"": injectCloudflareWebAnalytics(indexPage, "")}
+	if defaultToken != "" {
+		injectedPages[defaultToken] = injectCloudflareWebAnalytics(indexPage, defaultToken)
+	}
+	for _, token := range hostTokens {
+		if _, ok := injectedPages[token]; !ok {
+			injectedPages[token] = injectCloudflareWebAnalytics(indexPage, token)
+		}
+	}
+
 	router.Use(gzip.Gzip(gzip.DefaultCompression))
 	router.Use(middleware.GlobalWebRateLimit())
 	router.Use(middleware.Cache())
@@ -37,17 +54,38 @@ func SetWebRouter(router *gin.Engine, assets WebAssets) {
 			return
 		}
 		c.Header("Cache-Control", "no-cache")
-		analyticsToken := cloudflareWebAnalyticsTokenForHost(
-			c.Request.Host,
-			assets.CloudflareWebAnalyticsToken,
-			assets.CloudflareWebAnalyticsHostTokens,
-		)
-		c.Data(
-			http.StatusOK,
-			"text/html; charset=utf-8",
-			injectCloudflareWebAnalytics(assets.IndexPage, analyticsToken),
-		)
+		token := cloudflareWebAnalyticsTokenForHost(c.Request.Host, defaultToken, hostTokens)
+		page, ok := injectedPages[token]
+		if !ok {
+			page = injectCloudflareWebAnalytics(indexPage, token)
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", page)
 	})
+}
+
+// ParseCloudflareWebAnalyticsHostTokens parses a "host=token,host=token,..."
+// config string into a normalized host->token map. Malformed entries and those
+// with an empty host or token are skipped.
+func ParseCloudflareWebAnalyticsHostTokens(config string) map[string]string {
+	hostTokens := make(map[string]string)
+	for entry := range strings.SplitSeq(config, ",") {
+		host, token, ok := strings.Cut(entry, "=")
+		host = normalizeCloudflareWebAnalyticsHost(host)
+		token = strings.TrimSpace(token)
+		if !ok || host == "" || token == "" {
+			continue
+		}
+		hostTokens[host] = token
+	}
+	return hostTokens
+}
+
+// normalizeCloudflareWebAnalyticsHost lowercases a host and trims surrounding
+// whitespace and a trailing root dot so configured hosts and request hosts
+// compare consistently. Both the config parser and the request matcher rely on
+// this single rule.
+func normalizeCloudflareWebAnalyticsHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 }
 
 func cloudflareWebAnalyticsTokenForHost(requestHost string, defaultToken string, hostTokens map[string]string) string {
@@ -59,7 +97,7 @@ func cloudflareWebAnalyticsTokenForHost(requestHost string, defaultToken string,
 	if parsedHost, _, err := net.SplitHostPort(requestHost); err == nil {
 		host = parsedHost
 	}
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	host = normalizeCloudflareWebAnalyticsHost(host)
 
 	matchedHostLength := -1
 	matchedToken := ""

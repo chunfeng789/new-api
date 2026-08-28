@@ -6,6 +6,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestParseCloudflareWebAnalyticsHostTokens(t *testing.T) {
+	hostTokens := ParseCloudflareWebAnalyticsHostTokens(
+		"GPTTalkApp.com.=main-token, gpttalk.cc=mirror-token,invalid,missing-token=,=missing-host",
+	)
+
+	assert.Equal(t, map[string]string{
+		"gpttalkapp.com": "main-token",
+		"gpttalk.cc":     "mirror-token",
+	}, hostTokens)
+}
+
 func TestCloudflareWebAnalyticsTokenForHost(t *testing.T) {
 	hostTokens := map[string]string{
 		"gpttalkapp.com":       "main-token",
