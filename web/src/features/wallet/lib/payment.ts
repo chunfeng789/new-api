@@ -172,6 +172,14 @@ export function getMinTopupAmount(topupInfo: TopupInfo | null): number {
     return topupInfo.min_topup
   }
 
+  // Native WeChat/Alipay share the same MinTopUp as epay online top-up.
+  if (
+    topupInfo.enable_wechat_native_topup ||
+    topupInfo.enable_alipay_native_topup
+  ) {
+    return topupInfo.min_topup
+  }
+
   if (topupInfo.enable_stripe_topup) {
     return topupInfo.stripe_min_topup
   }

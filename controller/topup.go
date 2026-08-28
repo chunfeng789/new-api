@@ -25,10 +25,11 @@ import (
 func GetTopUpInfo(c *gin.Context) {
 	complianceConfirmed := operation_setting.IsPaymentComplianceConfirmed()
 
-	// 获取支付方式
-	payMethods := operation_setting.PayMethods
-	if !complianceConfirmed {
-		payMethods = []map[string]string{}
+	// 获取支付方式：易支付聚合的方式（alipay/wxpay/custom 等）都需要易支付凭据，
+	// 仅在易支付真正可用时展示，否则用户会点到不可用的方式（如仅配置了原生扫码时）。
+	payMethods := []map[string]string{}
+	if isEpayTopUpEnabled() {
+		payMethods = operation_setting.PayMethods
 	}
 
 	// 如果启用了 Stripe 支付，添加到支付方法列表
