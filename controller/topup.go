@@ -622,9 +622,9 @@ func isNativeQROrder(topUp *model.TopUp) bool {
 
 // 后台退款对账任务参数。
 const (
-	nativeRefundReconcileInterval = 2 * time.Minute
-	nativeRefundReconcileBatch    = 100
-	nativeRefundQueryTimeout      = 15 * time.Second
+	nativeReconcileInterval     = 2 * time.Minute
+	nativeReconcileBatch        = 100
+	nativeReconcileQueryTimeout = 15 * time.Second
 )
 
 // applyRefundOutcome 依据渠道退款结果推进本地订单状态，返回结果状态。
@@ -740,7 +740,7 @@ func AdminRefundTopUp(c *gin.Context) {
 // ReconcileNativeRefunds 扫描处于退款处理中的原生扫码订单，向渠道查询并推进结算。
 // 脱离用户请求运行，保证渠道最终退款成功后本地额度一定被回滚（重启/断连不丢单）。
 func ReconcileNativeRefunds() {
-	orders, err := model.GetPendingNativeRefunds(nativeRefundReconcileBatch)
+	orders, err := model.GetPendingNativeRefunds(nativeReconcileBatch)
 	if err != nil {
 		common.SysError("原生扫码 退款对账拉取订单失败: " + err.Error())
 		return
@@ -760,7 +760,7 @@ func reconcileOneNativeRefund(tradeNo, provider string) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), nativeRefundQueryTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), nativeReconcileQueryTimeout)
 	defer cancel()
 	outcome, err := service.NativeRefundQuery(ctx, provider, tradeNo)
 	if err != nil {
@@ -773,11 +773,16 @@ func reconcileOneNativeRefund(tradeNo, provider string) {
 	}
 }
 
-// StartNativeRefundReconciler 周期性运行退款对账，直到进程退出。由 main 以 goroutine 启动。
-func StartNativeRefundReconciler() {
-	ticker := time.NewTicker(nativeRefundReconcileInterval)
+// StartNativeOrderReconciler 周期性对账微信/支付宝原生扫码订单，直到进程退出：
+//   - 待支付充值订单：主动查渠道，已支付则结算到账、超时未支付则置为过期
+//   - 退款处理中订单：主动查渠道，确认成功则回滚额度、终态失败则回退/标记异常
+//
+// 保证服务重启/断连/漏回调时订单仍被自动补偿。由 main 以 goroutine 启动。
+func StartNativeOrderReconciler() {
+	ticker := time.NewTicker(nativeReconcileInterval)
 	defer ticker.Stop()
 	for range ticker.C {
+		ReconcilePendingNativeTopups()
 		ReconcileNativeRefunds()
 	}
 }

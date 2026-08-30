@@ -133,10 +133,11 @@ func main() {
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()
 
-	// Reconcile WeChat/Alipay native QR refunds that are still processing, so a
-	// gateway-confirmed refund always rolls back the local quota even if the
-	// admin request was interrupted or the process restarted.
-	go controller.StartNativeRefundReconciler()
+	// Reconcile WeChat/Alipay native QR orders (pending top-ups and in-flight
+	// refunds) against the gateway, so a completed payment or a gateway-confirmed
+	// refund is always settled even if a callback was missed, the client closed
+	// the page, or the process restarted mid-flow.
+	go controller.StartNativeOrderReconciler()
 
 	// Report this process as a system instance so the System Info page can show
 	// all currently alive nodes in multi-instance deployments.

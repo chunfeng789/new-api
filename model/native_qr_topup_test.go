@@ -274,3 +274,34 @@ func TestGetPendingNativeRefundsOnlyReturnsPendingNativeOrders(t *testing.T) {
 	require.Len(t, pendings, 1)
 	assert.Equal(t, "NATIVEREFUNDPENDLIST", pendings[0].TradeNo)
 }
+
+// GetReconcilableNativeTopups 只返回创建满 minAge 的待支付原生订单，用于充值对账。
+func TestGetReconcilableNativeTopupsFiltersByAgeStatusAndProvider(t *testing.T) {
+	truncateTables(t)
+
+	now := common.GetTimestamp()
+	insert := func(tradeNo, provider, status string, createTime int64) {
+		require.NoError(t, DB.Create(&TopUp{
+			UserId: 700, Amount: 2, Money: 10.0, TradeNo: tradeNo,
+			PaymentMethod: provider, PaymentProvider: provider,
+			CreateTime: createTime, Status: status,
+		}).Error)
+	}
+	// 满足条件：待支付、原生渠道、创建已超过 5 分钟
+	insert("RECON-OLD-WX", PaymentProviderWechatNative, common.TopUpStatusPending, now-600)
+	insert("RECON-OLD-ALI", PaymentProviderAlipayNative, common.TopUpStatusPending, now-600)
+	// 太新（1 分钟前）：应排除，避开用户仍在支付
+	insert("RECON-NEW", PaymentProviderWechatNative, common.TopUpStatusPending, now-60)
+	// 非原生渠道：应排除
+	insert("RECON-EPAY", PaymentProviderEpay, common.TopUpStatusPending, now-600)
+	// 非待支付：应排除
+	insert("RECON-SUCCESS", PaymentProviderWechatNative, common.TopUpStatusSuccess, now-600)
+
+	got, err := GetReconcilableNativeTopups(300, 100)
+	require.NoError(t, err)
+	tradeNos := make([]string, 0, len(got))
+	for _, o := range got {
+		tradeNos = append(tradeNos, o.TradeNo)
+	}
+	assert.ElementsMatch(t, []string{"RECON-OLD-WX", "RECON-OLD-ALI"}, tradeNos)
+}

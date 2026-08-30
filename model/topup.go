@@ -399,6 +399,25 @@ func GetPendingNativeRefunds(limit int) ([]*TopUp, error) {
 	return topups, nil
 }
 
+// GetReconcilableNativeTopups 拉取待支付的原生扫码充值订单（供后台对账），仅取创建满
+// minAgeSeconds 的订单以避开刚创建、用户仍在支付的订单，按 id 升序、限量。
+func GetReconcilableNativeTopups(minAgeSeconds int64, limit int) ([]*TopUp, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	cutoff := common.GetTimestamp() - minAgeSeconds
+	var topups []*TopUp
+	err := DB.Where("status = ? AND payment_provider IN ? AND create_time <= ?",
+		common.TopUpStatusPending,
+		[]string{PaymentProviderWechatNative, PaymentProviderAlipayNative},
+		cutoff,
+	).Order("id asc").Limit(limit).Find(&topups).Error
+	if err != nil {
+		return nil, err
+	}
+	return topups, nil
+}
+
 // RefundNativeQR 在渠道侧退款确认成功后，原子回滚微信/支付宝原生扫码订单的本地记账：
 // 订单行锁 + 事务内状态校验，把结算时到账的额度快照（CreditedQuota）从用户余额原数扣回，
 // 标记为 refunded 并记录 RefundTime（不覆盖原支付完成时间 CompleteTime）。
