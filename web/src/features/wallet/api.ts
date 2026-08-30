@@ -34,7 +34,6 @@ import type {
   BillingHistoryResponse,
   CompleteOrderRequest,
   RefundOrderRequest,
-  RefundStatusResponse,
   CreemPaymentRequest,
   CreemPaymentResponse,
   NativePaymentResponse,
@@ -279,34 +278,15 @@ export async function completeOrder(
 }
 
 /**
- * Refund a WeChat/Alipay native QR order (admin only).
- * Returns the resulting order status: 'refunded' when the gateway confirmed and
- * quota was rolled back, or 'refund_pending' when the gateway is still
- * processing (poll queryRefundOrder to finalize).
+ * Refund a WeChat/Alipay native QR order (admin only). The backend synchronously
+ * waits for the gateway to confirm the refund before rolling back the credited
+ * quota, so a successful response means the refund is fully settled.
  */
 export async function refundOrder(
   request: RefundOrderRequest
-): Promise<ApiResponse<RefundStatusResponse>> {
+): Promise<ApiResponse> {
   const res = await api.post('/api/user/topup/refund', request, {
     skipBusinessError: true,
   } as Record<string, unknown>)
-  return res.data
-}
-
-/**
- * Poll a processing refund (admin only). The backend re-queries the gateway and,
- * on confirmed success, rolls back the quota and marks the order refunded; on
- * gateway failure it reverts the order to 'success'.
- */
-export async function queryRefundOrder(
-  tradeNo: string
-): Promise<ApiResponse<RefundStatusResponse>> {
-  const params = new URLSearchParams({ trade_no: tradeNo })
-  const res = await api.get(
-    `/api/user/topup/refund/query?${params.toString()}`,
-    {
-      skipBusinessError: true,
-    } as Record<string, unknown>
-  )
   return res.data
 }

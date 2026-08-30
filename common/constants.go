@@ -259,10 +259,9 @@ const (
 )
 
 const (
-	TopUpStatusPending       = "pending"
-	TopUpStatusSuccess       = "success"
-	TopUpStatusFailed        = "failed"
-	TopUpStatusExpired       = "expired"
-	TopUpStatusRefundPending = "refund_pending"
-	TopUpStatusRefunded      = "refunded"
+	TopUpStatusPending  = "pending"
+	TopUpStatusSuccess  = "success"
+	TopUpStatusFailed   = "failed"
+	TopUpStatusExpired  = "expired"
+	TopUpStatusRefunded = "refunded"
 )

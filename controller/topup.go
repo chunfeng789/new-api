@@ -613,46 +613,15 @@ type AdminRefundTopupRequest struct {
 	Reason  string `json:"reason"`
 }
 
-// AdminRefundTopUp 管理员对微信/支付宝原生扫码订单发起全额退款：
-// 先向支付渠道申请退款（out_refund_no 幂等），成功后回滚本地额度并将订单标记为 refunded。
 // isNativeQROrder 判断订单是否为微信/支付宝原生扫码渠道。
 func isNativeQROrder(topUp *model.TopUp) bool {
 	return topUp.PaymentProvider == model.PaymentProviderWechatNative ||
 		topUp.PaymentProvider == model.PaymentProviderAlipayNative
 }
 
-// settleNativeRefund 根据渠道退款结果结算本地记账并写回统一响应：
-//   - success：确认到账后回滚额度并标记 refunded
-//   - processing：渠道受理但未确认（微信异步退款），标记 refund_pending，不扣额度，待查询确认
-//   - failed：渠道退款失败，把处理中的订单退回 success
-//
-// 调用方必须已持有订单锁（LockOrder）。
-func settleNativeRefund(c *gin.Context, topUp *model.TopUp, result string) {
-	switch result {
-	case service.RefundResultSuccess:
-		if _, err := model.RefundNativeQR(topUp.TradeNo, topUp.PaymentProvider, c.ClientIP()); err != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款后回滚额度失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
-			common.ApiErrorMsg(c, "渠道已退款，但回滚额度失败，请检查订单："+err.Error())
-			return
-		}
-		common.ApiSuccess(c, gin.H{"status": common.TopUpStatusRefunded})
-	case service.RefundResultProcessing:
-		if err := model.MarkRefundPendingNativeQR(topUp.TradeNo, topUp.PaymentProvider); err != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 标记退款处理中失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
-			common.ApiErrorMsg(c, "标记退款处理中失败："+err.Error())
-			return
-		}
-		common.ApiSuccess(c, gin.H{"status": common.TopUpStatusRefundPending})
-	case service.RefundResultFailed:
-		if err := model.RevertRefundPendingNativeQR(topUp.TradeNo, topUp.PaymentProvider); err != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款失败回退状态失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
-		}
-		common.ApiErrorMsg(c, "退款失败，请到商户平台核实")
-	default:
-		common.ApiErrorMsg(c, "未知退款结果")
-	}
-}
-
+// AdminRefundTopUp 管理员对微信/支付宝原生扫码订单发起全额退款。
+// 与 chatgpt 项目一致：service.NativeRefund 在服务端【同步等待】渠道退款确认，
+// 请求返回时退款结果已确定，不依赖前端保持在线；确认成功后才回滚本地额度并标记 refunded。
 func AdminRefundTopUp(c *gin.Context) {
 	var req AdminRefundTopupRequest
 	if err := c.ShouldBindJSON(&req); err != nil || req.TradeNo == "" {
@@ -677,9 +646,13 @@ func AdminRefundTopUp(c *gin.Context) {
 		common.ApiErrorMsg(c, "订单已退款")
 		return
 	}
-	// 允许 success（首次退款）与 refund_pending（重试处理中退款）发起
-	if topUp.Status != common.TopUpStatusSuccess && topUp.Status != common.TopUpStatusRefundPending {
+	if topUp.Status != common.TopUpStatusSuccess {
 		common.ApiErrorMsg(c, "仅支付成功的订单可退款")
+		return
+	}
+	// 缺少到账额度快照的历史订单拒绝自动退款，避免用当前费率错误扣回
+	if topUp.CreditedQuota <= 0 {
+		common.ApiErrorMsg(c, "该订单缺少到账额度快照，无法自动退款，请人工核对处理")
 		return
 	}
 
@@ -688,49 +661,19 @@ func AdminRefundTopUp(c *gin.Context) {
 		reason = "管理员退款"
 	}
 
-	// 向渠道发起退款；金额以本地订单为准，防止篡改。out_refund_no 复用订单号，重复发起幂等
-	result, err := service.NativeRefund(c.Request.Context(), topUp.PaymentProvider, topUp.TradeNo, reason, topUp.Money, topUp.Money)
-	if err != nil {
+	// 向渠道发起退款并同步等待确认；金额以本地订单为准，防止篡改。
+	// out_refund_no 复用订单号，重复发起幂等；CLOSED/ABNORMAL/超时均以 error 返回，不扣额度。
+	if err := service.NativeRefund(c.Request.Context(), topUp.PaymentProvider, topUp.TradeNo, reason, topUp.Money, topUp.Money); err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
 		common.ApiErrorMsg(c, "退款失败："+err.Error())
 		return
 	}
-	settleNativeRefund(c, topUp, result)
-}
 
-// AdminQueryRefundTopUp 查询退款处理中的订单是否最终到账，并在成功时结算本地额度回滚。
-// 供前端在收到 refund_pending 后轮询，最终把订单推进到 refunded 或退回 success。
-func AdminQueryRefundTopUp(c *gin.Context) {
-	tradeNo := c.Query("trade_no")
-	if tradeNo == "" {
-		common.ApiErrorMsg(c, "缺少订单号")
+	// 渠道退款已确认成功后回滚本地额度记账（幂等）
+	if _, err := model.RefundNativeQR(topUp.TradeNo, topUp.PaymentProvider, c.ClientIP()); err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款后回滚额度失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
+		common.ApiErrorMsg(c, "渠道已退款，但回滚额度失败，请检查订单："+err.Error())
 		return
 	}
-
-	LockOrder(tradeNo)
-	defer UnlockOrder(tradeNo)
-
-	topUp := model.GetTopUpByTradeNo(tradeNo)
-	if topUp == nil {
-		common.ApiErrorMsg(c, "订单不存在")
-		return
-	}
-	if !isNativeQROrder(topUp) {
-		common.ApiErrorMsg(c, "仅支持微信/支付宝原生扫码订单退款")
-		return
-	}
-	// 非处理中状态直接回报当前状态（已退款/已回退等）
-	if topUp.Status != common.TopUpStatusRefundPending {
-		common.ApiSuccess(c, gin.H{"status": topUp.Status})
-		return
-	}
-
-	result, err := service.NativeRefundQuery(c.Request.Context(), topUp.PaymentProvider, topUp.TradeNo)
-	if err != nil {
-		logger.LogWarn(c.Request.Context(), fmt.Sprintf("原生扫码 退款查询失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
-		// 查询失败时保持处理中，稍后重试
-		common.ApiSuccess(c, gin.H{"status": common.TopUpStatusRefundPending})
-		return
-	}
-	settleNativeRefund(c, topUp, result)
+	common.ApiSuccess(c, nil)
 }
