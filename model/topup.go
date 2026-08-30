@@ -22,6 +22,9 @@ type TopUp struct {
 	CreateTime      int64   `json:"create_time"`
 	CompleteTime    int64   `json:"complete_time"`
 	Status          string  `json:"status"`
+	// CreditedQuota 记录结算时实际到账的额度（不可变快照）。退款按此原数扣回，
+	// 避免结算后 QuotaPerUnit 变化导致用 Amount×当前费率重算得到错误的扣回额度。
+	CreditedQuota int `json:"credited_quota" gorm:"default:0"`
 }
 
 const (
@@ -277,6 +280,8 @@ func RechargeNativeQR(tradeNo string, expectedProvider string, callerIp string) 
 		}
 		topUp.CompleteTime = common.GetTimestamp()
 		topUp.Status = common.TopUpStatusSuccess
+		// 记录实际到账额度快照，退款按此原数扣回
+		topUp.CreditedQuota = quotaToAdd
 		if err := tx.Save(topUp).Error; err != nil {
 			return err
 		}
@@ -298,10 +303,83 @@ func RechargeNativeQR(tradeNo string, expectedProvider string, callerIp string) 
 	return false, nil
 }
 
-// RefundNativeQR 在渠道侧退款成功后，原子回滚微信/支付宝原生扫码订单的本地记账：
-// 订单行锁 + 事务内状态校验，把此前充值的额度从用户余额扣回，并将订单标记为 refunded。
-// 幂等：订单已是 refunded 时返回 alreadyDone=true，不再重复扣额。
-// 必须由调用方先完成渠道退款（out_refund_no 幂等）后再调用本函数。
+// refundQuotaToDeduct 计算退款应扣回的额度：优先使用结算时持久化的到账额度快照
+// （CreditedQuota），避免结算后 QuotaPerUnit 变化导致重算出错。仅当历史订单没有
+// 快照时（升级前的旧订单）才回退到 Amount×当前费率，并记录告警。
+func refundQuotaToDeduct(topUp *TopUp) int {
+	if topUp.CreditedQuota > 0 {
+		return topUp.CreditedQuota
+	}
+	quota, err := common.WalletQuotaFromDecimalStrict(
+		decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+	)
+	if err != nil || quota <= 0 {
+		return 0
+	}
+	common.SysLog(fmt.Sprintf("原生扫码退款回退到费率重算（订单无到账额度快照）trade_no=%s amount=%d quota=%d", topUp.TradeNo, topUp.Amount, quota))
+	return quota
+}
+
+// MarkRefundPendingNativeQR 把订单置为退款处理中（refund_pending），不扣回额度。
+// 用于渠道受理退款但尚未确认到账（尤其微信 PROCESSING）时，等待后续查询确认。
+// 幂等：订单已是 refund_pending 或 refunded 时直接返回。
+func MarkRefundPendingNativeQR(tradeNo string, expectedProvider string) error {
+	if tradeNo == "" {
+		return errors.New("未提供支付单号")
+	}
+	refCol := "`trade_no`"
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		refCol = `"trade_no"`
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		topUp := &TopUp{}
+		if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
+			return ErrTopUpNotFound
+		}
+		if topUp.PaymentProvider != expectedProvider {
+			return ErrPaymentMethodMismatch
+		}
+		if topUp.Status == common.TopUpStatusRefundPending || topUp.Status == common.TopUpStatusRefunded {
+			return nil
+		}
+		if topUp.Status != common.TopUpStatusSuccess {
+			return ErrTopUpNotRefundable
+		}
+		topUp.Status = common.TopUpStatusRefundPending
+		return tx.Save(topUp).Error
+	})
+}
+
+// RevertRefundPendingNativeQR 把退款处理中的订单退回 success（渠道退款最终失败/关闭时），
+// 不涉及额度变动。幂等：非 refund_pending 状态直接返回。
+func RevertRefundPendingNativeQR(tradeNo string, expectedProvider string) error {
+	if tradeNo == "" {
+		return errors.New("未提供支付单号")
+	}
+	refCol := "`trade_no`"
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		refCol = `"trade_no"`
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		topUp := &TopUp{}
+		if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
+			return ErrTopUpNotFound
+		}
+		if topUp.PaymentProvider != expectedProvider {
+			return ErrPaymentMethodMismatch
+		}
+		if topUp.Status != common.TopUpStatusRefundPending {
+			return nil
+		}
+		topUp.Status = common.TopUpStatusSuccess
+		return tx.Save(topUp).Error
+	})
+}
+
+// RefundNativeQR 在渠道侧退款确认成功后，原子回滚微信/支付宝原生扫码订单的本地记账：
+// 订单行锁 + 事务内状态校验，把结算时到账的额度快照从用户余额扣回，并标记为 refunded。
+// 允许从 success 或 refund_pending 结算。幂等：订单已是 refunded 时返回 alreadyDone=true。
+// 必须由调用方先确认渠道退款成功（out_refund_no 幂等）后再调用本函数。
 func RefundNativeQR(tradeNo string, expectedProvider string, callerIp string) (alreadyDone bool, err error) {
 	if tradeNo == "" {
 		return false, errors.New("未提供支付单号")
@@ -325,15 +403,12 @@ func RefundNativeQR(tradeNo string, expectedProvider string, callerIp string) (a
 			alreadyDone = true
 			return nil
 		}
-		// 仅已支付成功的订单可退款
-		if topUp.Status != common.TopUpStatusSuccess {
+		// 仅已支付成功、或退款处理中（异步退款经查询确认成功）的订单可结算退款
+		if topUp.Status != common.TopUpStatusSuccess && topUp.Status != common.TopUpStatusRefundPending {
 			return ErrTopUpNotRefundable
 		}
-		var quotaErr error
-		quotaToDeduct, quotaErr = common.WalletQuotaFromDecimalStrict(
-			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
-		)
-		if quotaErr != nil || quotaToDeduct <= 0 {
+		quotaToDeduct = refundQuotaToDeduct(topUp)
+		if quotaToDeduct <= 0 {
 			return ErrInvalidTopUpQuota
 		}
 		topUp.CompleteTime = common.GetTimestamp()
@@ -629,6 +704,8 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 		// 标记完成
 		topUp.CompleteTime = common.GetTimestamp()
 		topUp.Status = common.TopUpStatusSuccess
+		// 记录实际到账额度快照，退款按此原数扣回
+		topUp.CreditedQuota = quotaToAdd
 		if err := tx.Save(topUp).Error; err != nil {
 			return err
 		}

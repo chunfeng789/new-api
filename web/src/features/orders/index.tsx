@@ -142,6 +142,9 @@ export function Orders() {
       const channel = record.payment_provider || record.payment_method
       const isNativeOrder =
         channel === 'wechat_native' || channel === 'alipay_native'
+      const canRefund =
+        isNativeOrder &&
+        (record.status === 'success' || record.status === 'refund_pending')
       return (
         <TableRow key={record.id} className='hover:bg-muted/30'>
           <TableCell className='px-4 py-2.5 align-middle'>
@@ -191,7 +194,7 @@ export function Orders() {
           </TableCell>
           <TableCell className='py-2.5 align-middle'>
             <StatusBadge
-              label={statusConfig.label}
+              label={t(statusConfig.label)}
               variant={statusConfig.variant}
               showDot
               copyable={false}
@@ -211,7 +214,7 @@ export function Orders() {
                 {t('Complete Order')}
               </Button>
             )}
-            {record.status === 'success' && isNativeOrder && (
+            {canRefund && (
               <Button
                 size='sm'
                 variant='outline'
@@ -223,13 +226,14 @@ export function Orders() {
                   className='size-3.5'
                   aria-hidden='true'
                 />
-                {t('Refund')}
+                {record.status === 'refund_pending'
+                  ? t('Continue Refund')
+                  : t('Refund')}
               </Button>
             )}
-            {!(
-              record.status === 'pending' ||
-              (record.status === 'success' && isNativeOrder)
-            ) && <span className='text-muted-foreground text-xs'>-</span>}
+            {!(record.status === 'pending' || canRefund) && (
+              <span className='text-muted-foreground text-xs'>-</span>
+            )}
           </TableCell>
         </TableRow>
       )

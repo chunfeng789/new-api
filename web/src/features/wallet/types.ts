@@ -261,6 +261,7 @@ export type TopupStatus =
   | 'pending'
   | 'expired'
   | 'failed'
+  | 'refund_pending'
   | 'refunded'
 
 /**
@@ -311,4 +312,13 @@ export interface RefundOrderRequest {
   trade_no: string
   /** Optional refund reason forwarded to the payment gateway */
   reason?: string
+}
+
+/**
+ * Refund/refund-query response payload. `status` is the resulting order status:
+ * 'refunded' (done), 'refund_pending' (gateway still processing), or 'success'
+ * (a processing refund that the gateway ultimately failed, reverted).
+ */
+export interface RefundStatusResponse {
+  status: TopupStatus
 }

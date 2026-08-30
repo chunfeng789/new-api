@@ -28,9 +28,18 @@ import {
   getAllBillingHistory,
   completeOrder,
   refundOrder,
+  queryRefundOrder,
   isApiSuccess,
 } from '../api'
 import type { TopupRecord } from '../types'
+
+// Poll a processing refund until the gateway confirms it (or fails). The admin
+// initiated the action and is watching, so bound the wait rather than looping
+// forever: ~2s interval, up to 60s total.
+const REFUND_POLL_INTERVAL_MS = 2000
+const REFUND_POLL_MAX_ATTEMPTS = 30
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // ============================================================================
 // Billing History Hook
@@ -143,14 +152,41 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
       setRefunding(true)
       try {
         const response = await refundOrder({ trade_no: tradeNo })
-        if (isApiSuccess(response)) {
-          toast.success(i18next.t('Order refunded successfully'))
-          await fetchBillingHistory()
-          return true
-        } else {
+        if (!isApiSuccess(response)) {
           toast.error(response.message || i18next.t('Failed to refund order'))
           return false
         }
+
+        if (response.data?.status === 'refunded') {
+          toast.success(i18next.t('Order refunded successfully'))
+          await fetchBillingHistory()
+          return true
+        }
+
+        // Gateway is still processing (typically WeChat async refunds). Quota is
+        // NOT rolled back yet; poll until the gateway confirms success or fails.
+        toast.info(i18next.t('Refund is processing, confirming with the payment provider...'))
+        await fetchBillingHistory()
+        for (let attempt = 0; attempt < REFUND_POLL_MAX_ATTEMPTS; attempt++) {
+          await sleep(REFUND_POLL_INTERVAL_MS)
+          const poll = await queryRefundOrder(tradeNo)
+          if (!isApiSuccess(poll)) continue
+          const status = poll.data?.status
+          if (status === 'refunded') {
+            toast.success(i18next.t('Order refunded successfully'))
+            await fetchBillingHistory()
+            return true
+          }
+          if (status === 'success') {
+            // Reverted: the gateway ultimately rejected the refund.
+            toast.error(i18next.t('Refund failed, please verify in the merchant console'))
+            await fetchBillingHistory()
+            return false
+          }
+        }
+        toast.info(i18next.t('Refund is still processing, please check again later'))
+        await fetchBillingHistory()
+        return false
       } catch (error) {
         // eslint-disable-next-line no-console
         console.error('Failed to refund order:', error)

@@ -10,7 +10,5 @@
   "Turn off to use the Alipay sandbox": "Turn off to use the Alipay sandbox",
   "Paste the Alipay public key (PEM)": "Paste the Alipay public key (PEM)",
   "Used to verify gateway responses and async notifications.": "Used to verify gateway responses and async notifications.",
-  "Failed to refund order": "Failed to refund order",
-  "Are you sure you want to refund this order? The full amount will be returned to the payer through the payment gateway, and the credited quota will be deducted from the user. This action cannot be undone.": "Are you sure you want to refund this order? The full amount will be returned to the payer through the payment gateway, and the credited quota will be deducted from the user. This action cannot be undone.",
   "Review topup orders and manually complete payments.": "Review topup orders and manually complete payments."
 }
