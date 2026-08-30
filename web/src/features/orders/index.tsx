@@ -24,6 +24,7 @@ import {
   ReceiptText,
   RefreshCw,
   Search,
+  Undo2,
 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -88,14 +89,17 @@ export function Orders() {
     keyword,
     loading,
     completing,
+    refunding,
     handlePageChange,
     handlePageSizeChange,
     handleSearch,
     handleCompleteOrder,
+    handleRefundOrder,
     refresh,
   } = useBillingHistory()
 
   const [confirmTradeNo, setConfirmTradeNo] = useState<string | null>(null)
+  const [refundTradeNo, setRefundTradeNo] = useState<string | null>(null)
   const { copyToClipboard, copiedText } = useCopyToClipboard({ notify: false })
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -135,6 +139,9 @@ export function Orders() {
   } else {
     tableRows = records.map((record) => {
       const statusConfig = getStatusConfig(record.status)
+      const channel = record.payment_provider || record.payment_method
+      const isNativeOrder =
+        channel === 'wechat_native' || channel === 'alipay_native'
       return (
         <TableRow key={record.id} className='hover:bg-muted/30'>
           <TableCell className='px-4 py-2.5 align-middle'>
@@ -194,7 +201,7 @@ export function Orders() {
             {formatTimestamp(record.create_time)}
           </TableCell>
           <TableCell className='py-2.5 pr-4 text-right align-middle'>
-            {record.status === 'pending' ? (
+            {record.status === 'pending' && (
               <Button
                 size='sm'
                 variant='outline'
@@ -203,9 +210,26 @@ export function Orders() {
               >
                 {t('Complete Order')}
               </Button>
-            ) : (
-              <span className='text-muted-foreground text-xs'>-</span>
             )}
+            {record.status === 'success' && isNativeOrder && (
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() => setRefundTradeNo(record.trade_no)}
+                disabled={refunding}
+              >
+                <Undo2
+                  data-icon='inline-start'
+                  className='size-3.5'
+                  aria-hidden='true'
+                />
+                {t('Refund')}
+              </Button>
+            )}
+            {!(
+              record.status === 'pending' ||
+              (record.status === 'success' && isNativeOrder)
+            ) && <span className='text-muted-foreground text-xs'>-</span>}
           </TableCell>
         </TableRow>
       )
@@ -217,6 +241,14 @@ export function Orders() {
     const success = await handleCompleteOrder(confirmTradeNo)
     if (success) {
       setConfirmTradeNo(null)
+    }
+  }
+
+  const handleConfirmRefund = async () => {
+    if (!refundTradeNo) return
+    const success = await handleRefundOrder(refundTradeNo)
+    if (success) {
+      setRefundTradeNo(null)
     }
   }
 
@@ -370,6 +402,30 @@ export function Orders() {
             </AlertDialogCancel>
             <AlertDialogAction onClick={handleConfirmComplete} disabled={completing}>
               {completing ? t('Processing...') : t('Confirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={!!refundTradeNo}
+        onOpenChange={(open) => !open && setRefundTradeNo(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('Refund Order')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(
+                'Are you sure you want to refund this order? The full amount will be returned to the payer through the payment gateway, and the credited quota will be deducted from the user. This action cannot be undone.'
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={refunding}>
+              {t('Cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmRefund} disabled={refunding}>
+              {refunding ? t('Processing...') : t('Confirm')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

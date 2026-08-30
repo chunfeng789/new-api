@@ -607,3 +607,60 @@ func AdminCompleteTopUp(c *gin.Context) {
 	}
 	common.ApiSuccess(c, nil)
 }
+
+type AdminRefundTopupRequest struct {
+	TradeNo string `json:"trade_no"`
+	Reason  string `json:"reason"`
+}
+
+// AdminRefundTopUp 管理员对微信/支付宝原生扫码订单发起全额退款：
+// 先向支付渠道申请退款（out_refund_no 幂等），成功后回滚本地额度并将订单标记为 refunded。
+func AdminRefundTopUp(c *gin.Context) {
+	var req AdminRefundTopupRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.TradeNo == "" {
+		common.ApiErrorMsg(c, "参数错误")
+		return
+	}
+
+	// 订单级互斥，防止并发退款
+	LockOrder(req.TradeNo)
+	defer UnlockOrder(req.TradeNo)
+
+	topUp := model.GetTopUpByTradeNo(req.TradeNo)
+	if topUp == nil {
+		common.ApiErrorMsg(c, "订单不存在")
+		return
+	}
+	if topUp.PaymentProvider != model.PaymentProviderWechatNative && topUp.PaymentProvider != model.PaymentProviderAlipayNative {
+		common.ApiErrorMsg(c, "仅支持微信/支付宝原生扫码订单退款")
+		return
+	}
+	if topUp.Status == common.TopUpStatusRefunded {
+		common.ApiErrorMsg(c, "订单已退款")
+		return
+	}
+	if topUp.Status != common.TopUpStatusSuccess {
+		common.ApiErrorMsg(c, "仅支付成功的订单可退款")
+		return
+	}
+
+	reason := req.Reason
+	if reason == "" {
+		reason = "管理员退款"
+	}
+
+	// 先向渠道发起退款；金额以本地订单为准，防止篡改
+	if err := service.NativeRefund(c.Request.Context(), topUp.PaymentProvider, topUp.TradeNo, reason, topUp.Money, topUp.Money); err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
+		common.ApiErrorMsg(c, "退款失败："+err.Error())
+		return
+	}
+
+	// 渠道退款成功后回滚本地额度记账（幂等）
+	if _, err := model.RefundNativeQR(topUp.TradeNo, topUp.PaymentProvider, c.ClientIP()); err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款后回滚额度失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
+		common.ApiErrorMsg(c, "渠道已退款，但回滚额度失败，请检查订单："+err.Error())
+		return
+	}
+	common.ApiSuccess(c, nil)
+}

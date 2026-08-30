@@ -33,6 +33,7 @@ import type {
   AffiliateTransferResponse,
   BillingHistoryResponse,
   CompleteOrderRequest,
+  RefundOrderRequest,
   CreemPaymentRequest,
   CreemPaymentResponse,
   NativePaymentResponse,
@@ -273,5 +274,17 @@ export async function completeOrder(
   request: CompleteOrderRequest
 ): Promise<ApiResponse> {
   const res = await api.post('/api/user/topup/complete', request)
+  return res.data
+}
+
+/**
+ * Refund a WeChat/Alipay native QR order (admin only)
+ */
+export async function refundOrder(
+  request: RefundOrderRequest
+): Promise<ApiResponse> {
+  const res = await api.post('/api/user/topup/refund', request, {
+    skipBusinessError: true,
+  } as Record<string, unknown>)
   return res.data
 }

@@ -26,6 +26,14 @@ import (
 const alipayTradeStatusSuccess = "TRADE_SUCCESS"
 const alipayTradeStatusFinished = "TRADE_FINISHED"
 
+// 微信 V3 退款单状态（申请退款/查询退款返回）
+const (
+	wechatRefundStatusSuccess    = "SUCCESS"    // 退款成功
+	wechatRefundStatusClosed     = "CLOSED"     // 退款关闭
+	wechatRefundStatusProcessing = "PROCESSING" // 退款处理中
+	wechatRefundStatusAbnormal   = "ABNORMAL"   // 退款异常
+)
+
 // ---- 支付宝客户端（密钥模式，构造开销小，按需创建）----
 
 func newAlipayClient() (*alipay.Client, error) {
@@ -178,6 +186,68 @@ func NativeQuery(ctx context.Context, provider, tradeNo string) (bool, error) {
 		return st == alipayTradeStatusSuccess || st == alipayTradeStatusFinished, nil
 	default:
 		return false, fmt.Errorf("未知支付渠道: %s", provider)
+	}
+}
+
+// NativeRefund 发起微信/支付宝原生扫码订单退款。
+// 全额退款：refundYuan 为退款金额（元），totalYuan 为订单原金额（元，微信退款必填）。
+// out_refund_no / out_request_no 复用订单号 tradeNo，保证渠道侧幂等（重复退款不会重复出款）。
+func NativeRefund(ctx context.Context, provider, tradeNo, reason string, refundYuan, totalYuan float64) error {
+	switch provider {
+	case model.PaymentProviderWechatNative:
+		client, err := getWechatClient()
+		if err != nil {
+			return err
+		}
+		refundFen := decimal.NewFromFloat(refundYuan).Mul(decimal.NewFromInt(100)).Round(0).IntPart()
+		totalFen := decimal.NewFromFloat(totalYuan).Mul(decimal.NewFromInt(100)).Round(0).IntPart()
+		if refundFen <= 0 || totalFen <= 0 || refundFen > totalFen {
+			return errors.New("退款金额无效")
+		}
+		bm := make(gopay.BodyMap)
+		bm.Set("out_trade_no", tradeNo).
+			Set("out_refund_no", tradeNo).
+			Set("reason", reason).
+			SetBodyMap("amount", func(b gopay.BodyMap) {
+				b.Set("refund", refundFen).Set("total", totalFen).Set("currency", "CNY")
+			})
+		rsp, err := client.V3Refund(ctx, bm)
+		if err != nil {
+			return err
+		}
+		if rsp.Code != wechat.Success || rsp.Response == nil {
+			return fmt.Errorf("微信退款失败: %s", rsp.Error)
+		}
+		switch rsp.Response.Status {
+		case wechatRefundStatusSuccess, wechatRefundStatusProcessing:
+			// 成功或处理中均视为受理成功（余额退款通常即时 SUCCESS）
+			return nil
+		case wechatRefundStatusClosed:
+			return errors.New("微信退款已关闭")
+		case wechatRefundStatusAbnormal:
+			return errors.New("微信退款异常，请到商户平台处理")
+		default:
+			return fmt.Errorf("微信退款状态未知: %s", rsp.Response.Status)
+		}
+	case model.PaymentProviderAlipayNative:
+		client, err := newAlipayClient()
+		if err != nil {
+			return err
+		}
+		bm := make(gopay.BodyMap)
+		bm.Set("out_trade_no", tradeNo).
+			Set("out_request_no", tradeNo).
+			Set("refund_amount", decimal.NewFromFloat(refundYuan).Round(2).String())
+		if reason != "" {
+			bm.Set("refund_reason", reason)
+		}
+		// TradeRefund 在业务码非 10000 时返回错误（含 sub_msg），成功即 err==nil
+		if _, err := client.TradeRefund(ctx, bm); err != nil {
+			return err
+		}
+		return nil
+	default:
+		return fmt.Errorf("未知支付渠道: %s", provider)
 	}
 }
 

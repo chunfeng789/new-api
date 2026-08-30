@@ -256,7 +256,12 @@ export interface UserWalletData {
 /**
  * Topup record status
  */
-export type TopupStatus = 'success' | 'pending' | 'expired'
+export type TopupStatus =
+  | 'success'
+  | 'pending'
+  | 'expired'
+  | 'failed'
+  | 'refunded'
 
 /**
  * Topup billing record
@@ -274,6 +279,8 @@ export interface TopupRecord {
   trade_no: string
   /** Payment method type */
   payment_method: string
+  /** Payment provider (authoritative channel, e.g. wechat_native/alipay_native) */
+  payment_provider?: string
   /** Creation timestamp */
   create_time: number
   /** Completion timestamp */
@@ -295,4 +302,13 @@ export interface BillingHistoryResponse {
  */
 export interface CompleteOrderRequest {
   trade_no: string
+}
+
+/**
+ * Refund order request (admin only, WeChat/Alipay native QR orders)
+ */
+export interface RefundOrderRequest {
+  trade_no: string
+  /** Optional refund reason forwarded to the payment gateway */
+  reason?: string
 }
