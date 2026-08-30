@@ -83,6 +83,11 @@ var EmailDomainWhitelist = []string{
 	"yahoo.com",
 	"foxmail.com",
 }
+
+// 邀请奖励邮箱后缀限制：仅当新用户注册邮箱后缀在名单内时才发放邀请奖励
+var InviteRewardEmailRestrictionEnabled = false
+var InviteRewardEmailSuffixes = []string{}
+
 var EmailLoginAuthServerList = []string{
 	"smtp.sendcloud.net",
 	"smtp.azurecomm.net",

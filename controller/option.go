@@ -204,6 +204,14 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
+	case "InviteRewardEmailRestrictionEnabled":
+		if option.Value == "true" && len(common.InviteRewardEmailSuffixes) == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "无法启用邀请奖励邮箱后缀限制，请先填入允许的邮箱后缀！",
+			})
+			return
+		}
 	case "WeChatAuthEnabled":
 		if option.Value == "true" && common.WeChatServerAddress == "" {
 			c.JSON(http.StatusOK, gin.H{

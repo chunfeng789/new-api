@@ -118,6 +118,29 @@ func NormalizeBillingPreference(pref string) string {
 	}
 }
 
+// InviteRewardEmailAllowed 判断新注册用户的邮箱在后缀限制下是否有资格获得邀请奖励。
+// 当限制关闭时始终返回 true（保持向后兼容）；开启时，邮箱后缀需匹配名单中任一项，
+// 采用带 "@"/"." 边界的后缀匹配，避免 notgmail.com 命中 gmail.com。
+func InviteRewardEmailAllowed(email string) bool {
+	if !InviteRewardEmailRestrictionEnabled {
+		return true
+	}
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return false
+	}
+	for _, suffix := range InviteRewardEmailSuffixes {
+		suffix = strings.ToLower(strings.TrimSpace(suffix))
+		if suffix == "" {
+			continue
+		}
+		if strings.HasSuffix(email, "@"+suffix) || strings.HasSuffix(email, "."+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // MaskEmail masks a user email to prevent PII leakage in logs
 // Returns "***masked***" if email is empty, otherwise shows only the domain part
 func MaskEmail(email string) string {

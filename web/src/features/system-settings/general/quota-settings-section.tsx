@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import { Textarea } from '@/components/ui/textarea'
 import { formatQuota } from '@/lib/format'
 
 import { FormDirtyIndicator } from '../components/form-dirty-indicator'
@@ -55,6 +56,8 @@ const quotaSchema = z.object({
   PreConsumedQuota: z.coerce.number().min(0),
   QuotaForInviter: z.coerce.number().min(0),
   QuotaForInvitee: z.coerce.number().min(0),
+  InviteRewardEmailRestrictionEnabled: z.boolean(),
+  InviteRewardEmailSuffixes: z.string(),
   TopUpLink: z.string(),
   general_setting: z.object({
     docs_link: z.string(),
@@ -99,10 +102,18 @@ export function QuotaSettingsSection({
       defaultValues,
       onSubmit: async (_data, changedFields) => {
         for (const [key, value] of Object.entries(changedFields)) {
-          await updateOption.mutateAsync({
-            key,
-            value: value as string | number | boolean,
-          })
+          let outValue = value as string | number | boolean
+          if (
+            key === 'InviteRewardEmailSuffixes' &&
+            typeof value === 'string'
+          ) {
+            outValue = value
+              .split('\n')
+              .map((suffix) => suffix.trim())
+              .filter(Boolean)
+              .join(',')
+          }
+          await updateOption.mutateAsync({ key, value: outValue })
         }
       },
     })
@@ -236,6 +247,59 @@ export function QuotaSettingsSection({
                 </FormItem>
               )}
             />
+
+            <SettingsFormGridItem span='full'>
+              <FormField
+                control={form.control}
+                name='InviteRewardEmailRestrictionEnabled'
+                render={({ field }) => (
+                  <SettingsSwitchItem>
+                    <SettingsSwitchContent>
+                      <FormLabel>
+                        {t('Invite Reward Email Restriction')}
+                      </FormLabel>
+                      <FormDescription>
+                        {t(
+                          'When enabled, only new users whose registration email matches an allowed suffix will grant invite rewards.'
+                        )}
+                      </FormDescription>
+                    </SettingsSwitchContent>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                        disabled={updateOption.isPending}
+                      />
+                    </FormControl>
+                  </SettingsSwitchItem>
+                )}
+              />
+            </SettingsFormGridItem>
+
+            <SettingsFormGridItem span='full'>
+              <FormField
+                control={form.control}
+                name='InviteRewardEmailSuffixes'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Invite Reward Email Suffixes')}</FormLabel>
+                    <FormControl>
+                      <Textarea
+                        placeholder={t('gmail.com&#10;outlook.com')}
+                        rows={4}
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'One email suffix per line (only used when the invite reward email restriction is enabled). Note: for password registration the email is stored only when email verification is enabled, otherwise those users cannot earn invite rewards.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </SettingsFormGridItem>
 
             <SettingsFormGridItem span='full'>
               <FormField

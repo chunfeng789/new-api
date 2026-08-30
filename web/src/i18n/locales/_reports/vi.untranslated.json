@@ -10,5 +10,8 @@
   "Turn off to use the Alipay sandbox": "Turn off to use the Alipay sandbox",
   "Paste the Alipay public key (PEM)": "Paste the Alipay public key (PEM)",
   "Used to verify gateway responses and async notifications.": "Used to verify gateway responses and async notifications.",
-  "Review topup orders and manually complete payments.": "Review topup orders and manually complete payments."
+  "Review topup orders and manually complete payments.": "Review topup orders and manually complete payments.",
+  "One email suffix per line (only used when the invite reward email restriction is enabled). Note: for password registration the email is stored only when email verification is enabled, otherwise those users cannot earn invite rewards.": "One email suffix per line (only used when the invite reward email restriction is enabled). Note: for password registration the email is stored only when email verification is enabled, otherwise those users cannot earn invite rewards.",
+  "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.",
+  "To earn the invite reward, register with an email ending in {{suffixes}}.": "To earn the invite reward, register with an email ending in {{suffixes}}."
 }

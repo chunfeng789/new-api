@@ -5568,6 +5568,13 @@
     "Zero retention": "零数据保留",
     "Zhipu": "智谱",
     "Zhipu V4": "智谱 V4",
-    "Zoom": "缩放"
+    "Zoom": "缩放",
+    "Invite Reward Email Restriction": "邀请奖励邮箱后缀限制",
+    "When enabled, only new users whose registration email matches an allowed suffix will grant invite rewards.": "启用后，仅当新用户的注册邮箱后缀在名单内时，才会发放邀请奖励。",
+    "Invite Reward Email Suffixes": "邀请奖励邮箱后缀",
+    "gmail.com&#10;outlook.com": "gmail.com&#10;outlook.com",
+    "One email suffix per line (only used when the invite reward email restriction is enabled). Note: for password registration the email is stored only when email verification is enabled, otherwise those users cannot earn invite rewards.": "每行一个邮箱后缀（仅在启用邀请奖励邮箱后缀限制时生效）。注意：密码注册仅在开启邮箱验证时才会保存邮箱，否则这些用户无法获得邀请奖励。",
+    "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "只有使用以 {{suffixes}} 结尾的邮箱注册的被邀请用户，才能获得推荐奖励。",
+    "To earn the invite reward, register with an email ending in {{suffixes}}.": "使用以 {{suffixes}} 结尾的邮箱注册即可获得邀请奖励。"
   }
 }

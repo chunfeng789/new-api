@@ -108,6 +108,14 @@ export function SignUpForm({
     true
   const hasWeChatLogin = Boolean(status?.wechat_login)
   const turnstileReady = !isTurnstileEnabled || Boolean(turnstileToken)
+  const inviteRewardRestrictionEnabled =
+    status?.invite_reward_email_restriction_enabled === true
+  const inviteRewardEmailSuffixes = (
+    (status?.invite_reward_email_suffixes as string) || ''
+  )
+    .split(',')
+    .map((suffix) => suffix.trim())
+    .filter(Boolean)
 
   const wechatQrCodeUrl = useMemo(() => {
     return (
@@ -345,6 +353,17 @@ export function SignUpForm({
             </div>
           </>
         )}
+
+        {/* Invite reward email restriction notice */}
+        {inviteRewardRestrictionEnabled &&
+          inviteRewardEmailSuffixes.length > 0 && (
+            <p className='text-muted-foreground text-xs'>
+              {t(
+                'To earn the invite reward, register with an email ending in {{suffixes}}.',
+                { suffixes: inviteRewardEmailSuffixes.join(', ') }
+              )}
+            </p>
+          )}
 
         {/* Turnstile */}
         {isTurnstileEnabled && (
