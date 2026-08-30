@@ -23,7 +23,7 @@ type WebAssets struct {
 	CloudflareWebAnalyticsHostTokens map[string]string
 }
 
-func SetWebRouter(router *gin.Engine, assets WebAssets) {
+func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.HandlerFunc) {
 	frontendFS := common.EmbedFolder(assets.BuildFS, "web/dist")
 
 	// Pre-render the index page for every token that can be served so the SPA
@@ -43,24 +43,27 @@ func SetWebRouter(router *gin.Engine, assets WebAssets) {
 		}
 	}
 
-	router.Use(gzip.Gzip(gzip.DefaultCompression))
-	router.Use(middleware.GlobalWebRateLimit())
-	router.Use(middleware.Cache())
-	router.Use(static.Serve("/", frontendFS))
-	router.NoRoute(func(c *gin.Context) {
-		c.Set(middleware.RouteTagKey, "web")
-		if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") {
-			controller.RelayNotFound(c)
-			return
-		}
-		c.Header("Cache-Control", "no-cache")
-		token := cloudflareWebAnalyticsTokenForHost(c.Request.Host, defaultToken, hostTokens)
-		page, ok := injectedPages[token]
-		if !ok {
-			page = injectCloudflareWebAnalytics(indexPage, token)
-		}
-		c.Data(http.StatusOK, "text/html; charset=utf-8", page)
-	})
+	router.NoRoute(
+		pluginDispatcher,
+		middleware.RouteTag("web"),
+		gzip.Gzip(gzip.DefaultCompression),
+		middleware.GlobalWebRateLimit(),
+		middleware.Cache(),
+		static.Serve("/", frontendFS),
+		func(c *gin.Context) {
+			if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") {
+				controller.RelayNotFound(c)
+				return
+			}
+			c.Header("Cache-Control", "no-cache")
+			token := cloudflareWebAnalyticsTokenForHost(c.Request.Host, defaultToken, hostTokens)
+			page, ok := injectedPages[token]
+			if !ok {
+				page = injectCloudflareWebAnalytics(indexPage, token)
+			}
+			c.Data(http.StatusOK, "text/html; charset=utf-8", page)
+		},
+	)
 }
 
 // ParseCloudflareWebAnalyticsHostTokens parses a "host=token,host=token,..."
