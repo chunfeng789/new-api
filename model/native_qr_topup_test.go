@@ -189,3 +189,88 @@ func TestRefundNativeQRRejectsOrderWithoutSnapshot(t *testing.T) {
 	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
 	assert.Equal(t, common.TopUpStatusSuccess, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
 }
+
+// 退款处理中状态流转（健壮版：持久化 refund_pending + 后台对账）的不变量守护。
+
+func TestMarkRefundPendingThenSettleFromPending(t *testing.T) {
+	truncateTables(t)
+
+	user := insertUserForPaymentGuardTest(t, 631, 1_000_000)
+	order := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDPENDFLOW", PaymentProviderWechatNative, 1_000_000, 1000)
+
+	// 发起前置为处理中：不扣额度
+	require.NoError(t, MarkRefundPendingNativeQR(order.TradeNo, PaymentProviderWechatNative))
+	assert.Equal(t, common.TopUpStatusRefundPending, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
+
+	// 幂等：重复标记不报错、不变更
+	require.NoError(t, MarkRefundPendingNativeQR(order.TradeNo, PaymentProviderWechatNative))
+	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
+
+	// 对账确认成功后从 refund_pending 结算：扣回快照并置 refunded
+	alreadyDone, err := RefundNativeQR(order.TradeNo, PaymentProviderWechatNative, "reconcile")
+	require.NoError(t, err)
+	assert.False(t, alreadyDone)
+	assert.Equal(t, 0, getUserQuotaForPaymentGuardTest(t, user.Id))
+	assert.Equal(t, common.TopUpStatusRefunded, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+}
+
+func TestMarkRefundPendingRejectsRefundedOrder(t *testing.T) {
+	truncateTables(t)
+
+	user := insertUserForPaymentGuardTest(t, 632, 1_000_000)
+	order := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDPENDGUARD", PaymentProviderWechatNative, 1_000_000, 1000)
+	require.NoError(t, MarkRefundPendingNativeQR(order.TradeNo, PaymentProviderWechatNative))
+	_, err := RefundNativeQR(order.TradeNo, PaymentProviderWechatNative, "reconcile")
+	require.NoError(t, err)
+
+	// 已 refunded 的订单不能再被置回处理中
+	err = MarkRefundPendingNativeQR(order.TradeNo, PaymentProviderWechatNative)
+	require.ErrorIs(t, err, ErrTopUpNotRefundable)
+	assert.Equal(t, common.TopUpStatusRefunded, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+}
+
+func TestRevertRefundPendingToSuccess(t *testing.T) {
+	truncateTables(t)
+
+	user := insertUserForPaymentGuardTest(t, 633, 1_000_000)
+	order := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDREVERT", PaymentProviderWechatNative, 1_000_000, 1000)
+	require.NoError(t, MarkRefundPendingNativeQR(order.TradeNo, PaymentProviderWechatNative))
+
+	// 渠道退款已关闭：回退 success，不扣额度
+	require.NoError(t, RevertRefundPendingToSuccess(order.TradeNo, PaymentProviderWechatNative))
+	assert.Equal(t, common.TopUpStatusSuccess, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
+}
+
+func TestMarkRefundFailedFromPending(t *testing.T) {
+	truncateTables(t)
+
+	user := insertUserForPaymentGuardTest(t, 634, 1_000_000)
+	order := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDABNORMAL", PaymentProviderWechatNative, 1_000_000, 1000)
+	require.NoError(t, MarkRefundPendingNativeQR(order.TradeNo, PaymentProviderWechatNative))
+
+	// 渠道退款异常：置为终态 refund_failed，不扣额度
+	require.NoError(t, MarkRefundFailedNativeQR(order.TradeNo, PaymentProviderWechatNative))
+	assert.Equal(t, common.TopUpStatusRefundFailed, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
+}
+
+func TestGetPendingNativeRefundsOnlyReturnsPendingNativeOrders(t *testing.T) {
+	truncateTables(t)
+
+	user := insertUserForPaymentGuardTest(t, 635, 5_000_000)
+	// 一笔处理中的微信原生订单：应被返回
+	pendingOrder := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDPENDLIST", PaymentProviderWechatNative, 1_000_000, 1000)
+	require.NoError(t, MarkRefundPendingNativeQR(pendingOrder.TradeNo, PaymentProviderWechatNative))
+	// 一笔仍 success 的原生订单：不应被返回
+	createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDSUCCLIST", PaymentProviderAlipayNative, 1_000_000, 1000)
+	// 一笔非原生渠道、状态被人为置为 refund_pending 的订单：不应被返回
+	foreign := createEpayTestOrder(t, user.Id, "EPAYREFUNDPENDLIST", PaymentProviderEpay, common.TopUpStatusRefundPending)
+	_ = foreign
+
+	pendings, err := GetPendingNativeRefunds(100)
+	require.NoError(t, err)
+	require.Len(t, pendings, 1)
+	assert.Equal(t, "NATIVEREFUNDPENDLIST", pendings[0].TradeNo)
+}

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -619,9 +620,42 @@ func isNativeQROrder(topUp *model.TopUp) bool {
 		topUp.PaymentProvider == model.PaymentProviderAlipayNative
 }
 
+// 后台退款对账任务参数。
+const (
+	nativeRefundReconcileInterval = 2 * time.Minute
+	nativeRefundReconcileBatch    = 100
+	nativeRefundQueryTimeout      = 15 * time.Second
+)
+
+// applyRefundOutcome 依据渠道退款结果推进本地订单状态，返回结果状态。
+// success→回滚额度并置 refunded；closed→回退 success；abnormal→refund_failed；
+// processing→保持 refund_pending（交由后台对账继续确认）。供退款接口与对账任务复用。
+func applyRefundOutcome(tradeNo, provider, callerIp string, outcome service.RefundOutcome) (string, error) {
+	switch outcome {
+	case service.RefundOutcomeSuccess:
+		if _, err := model.RefundNativeQR(tradeNo, provider, callerIp); err != nil {
+			return "", err
+		}
+		return common.TopUpStatusRefunded, nil
+	case service.RefundOutcomeClosed:
+		if err := model.RevertRefundPendingToSuccess(tradeNo, provider); err != nil {
+			return "", err
+		}
+		return common.TopUpStatusSuccess, nil
+	case service.RefundOutcomeAbnormal:
+		if err := model.MarkRefundFailedNativeQR(tradeNo, provider); err != nil {
+			return "", err
+		}
+		return common.TopUpStatusRefundFailed, nil
+	default: // RefundOutcomeProcessing
+		return common.TopUpStatusRefundPending, nil
+	}
+}
+
 // AdminRefundTopUp 管理员对微信/支付宝原生扫码订单发起全额退款。
-// 与 chatgpt 项目一致：service.NativeRefund 在服务端【同步等待】渠道退款确认，
-// 请求返回时退款结果已确定，不依赖前端保持在线；确认成功后才回滚本地额度并标记 refunded。
+// 健壮流程：发起前先持久化 refund_pending，再向渠道申请退款（out_refund_no 幂等）；
+// 请求内做短暂快速确认（UX），未确认的订单保持 refund_pending，由后台对账任务
+// (ReconcileNativeRefunds) 脱离本请求继续确认结算——因此服务重启/请求中断不会丢单。
 func AdminRefundTopUp(c *gin.Context) {
 	var req AdminRefundTopupRequest
 	if err := c.ShouldBindJSON(&req); err != nil || req.TradeNo == "" {
@@ -642,11 +676,17 @@ func AdminRefundTopUp(c *gin.Context) {
 		common.ApiErrorMsg(c, "仅支持微信/支付宝原生扫码订单退款")
 		return
 	}
+	// 幂等：已退款直接返回成功（首次成功但响应丢失时，重试不再报错）
 	if topUp.Status == common.TopUpStatusRefunded {
-		common.ApiErrorMsg(c, "订单已退款")
+		common.ApiSuccess(c, gin.H{"status": common.TopUpStatusRefunded})
 		return
 	}
-	if topUp.Status != common.TopUpStatusSuccess {
+	if topUp.Status == common.TopUpStatusRefundFailed {
+		common.ApiErrorMsg(c, "退款异常，请到商户平台核实处理")
+		return
+	}
+	// 允许 success（首次退款）与 refund_pending（重试/手动催单）发起
+	if topUp.Status != common.TopUpStatusSuccess && topUp.Status != common.TopUpStatusRefundPending {
 		common.ApiErrorMsg(c, "仅支付成功的订单可退款")
 		return
 	}
@@ -661,19 +701,83 @@ func AdminRefundTopUp(c *gin.Context) {
 		reason = "管理员退款"
 	}
 
-	// 向渠道发起退款并同步等待确认；金额以本地订单为准，防止篡改。
-	// out_refund_no 复用订单号，重复发起幂等；CLOSED/ABNORMAL/超时均以 error 返回，不扣额度。
-	if err := service.NativeRefund(c.Request.Context(), topUp.PaymentProvider, topUp.TradeNo, reason, topUp.Money, topUp.Money); err != nil {
-		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
+	// 发起前先持久化 refund_pending，确保即使后续中断/重启，后台对账仍能接手
+	if err := model.MarkRefundPendingNativeQR(topUp.TradeNo, topUp.PaymentProvider); err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 标记退款处理中失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
+		common.ApiErrorMsg(c, "发起退款失败："+err.Error())
+		return
+	}
+
+	// 向渠道发起退款并做短暂快速确认；金额以本地订单为准防篡改。
+	// 申请不确定时内部会按 out_refund_no 查询确认；error 仅表示发起前的配置/参数问题。
+	outcome, err := service.NativeRefundSubmit(c.Request.Context(), topUp.PaymentProvider, topUp.TradeNo, reason, topUp.Money, topUp.Money)
+	if err != nil {
+		// 尚未真正发起，回退处理中状态，避免订单空挂
+		_ = model.RevertRefundPendingToSuccess(topUp.TradeNo, topUp.PaymentProvider)
+		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款发起失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
 		common.ApiErrorMsg(c, "退款失败："+err.Error())
 		return
 	}
 
-	// 渠道退款已确认成功后回滚本地额度记账（幂等）
-	if _, err := model.RefundNativeQR(topUp.TradeNo, topUp.PaymentProvider, c.ClientIP()); err != nil {
-		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款后回滚额度失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
-		common.ApiErrorMsg(c, "渠道已退款，但回滚额度失败，请检查订单："+err.Error())
+	status, err := applyRefundOutcome(topUp.TradeNo, topUp.PaymentProvider, c.ClientIP(), outcome)
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款结算失败 trade_no=%s provider=%s outcome=%d error=%q", topUp.TradeNo, topUp.PaymentProvider, outcome, err.Error()))
+		common.ApiErrorMsg(c, "渠道退款已受理，但本地结算失败，请稍后在订单管理查看："+err.Error())
 		return
 	}
-	common.ApiSuccess(c, nil)
+
+	switch status {
+	case common.TopUpStatusRefunded, common.TopUpStatusRefundPending:
+		// refunded：已完成；refund_pending：渠道处理中，后台对账将自动确认到账
+		common.ApiSuccess(c, gin.H{"status": status})
+	case common.TopUpStatusRefundFailed:
+		common.ApiErrorMsg(c, "退款异常，请到商户平台核实处理")
+	default: // 回退为 success，即渠道退款已关闭、未发生扣款
+		common.ApiErrorMsg(c, "退款已关闭，未发生扣款")
+	}
+}
+
+// ReconcileNativeRefunds 扫描处于退款处理中的原生扫码订单，向渠道查询并推进结算。
+// 脱离用户请求运行，保证渠道最终退款成功后本地额度一定被回滚（重启/断连不丢单）。
+func ReconcileNativeRefunds() {
+	orders, err := model.GetPendingNativeRefunds(nativeRefundReconcileBatch)
+	if err != nil {
+		common.SysError("原生扫码 退款对账拉取订单失败: " + err.Error())
+		return
+	}
+	for _, order := range orders {
+		reconcileOneNativeRefund(order.TradeNo, order.PaymentProvider)
+	}
+}
+
+func reconcileOneNativeRefund(tradeNo, provider string) {
+	LockOrder(tradeNo)
+	defer UnlockOrder(tradeNo)
+
+	// 加锁后重读，避免与退款接口/其它对账并发
+	cur := model.GetTopUpByTradeNo(tradeNo)
+	if cur == nil || cur.Status != common.TopUpStatusRefundPending {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nativeRefundQueryTimeout)
+	defer cancel()
+	outcome, err := service.NativeRefundQuery(ctx, provider, tradeNo)
+	if err != nil {
+		// 临时查询失败：保持处理中，下一轮再试
+		logger.LogWarn(ctx, fmt.Sprintf("原生扫码 退款对账查询失败 trade_no=%s provider=%s error=%q", tradeNo, provider, err.Error()))
+		return
+	}
+	if _, err := applyRefundOutcome(tradeNo, provider, "reconcile", outcome); err != nil {
+		common.SysError(fmt.Sprintf("原生扫码 退款对账结算失败 trade_no=%s provider=%s outcome=%d error=%s", tradeNo, provider, outcome, err.Error()))
+	}
+}
+
+// StartNativeRefundReconciler 周期性运行退款对账，直到进程退出。由 main 以 goroutine 启动。
+func StartNativeRefundReconciler() {
+	ticker := time.NewTicker(nativeRefundReconcileInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		ReconcileNativeRefunds()
+	}
 }

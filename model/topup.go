@@ -306,6 +306,99 @@ func RechargeNativeQR(tradeNo string, expectedProvider string, callerIp string) 
 	return false, nil
 }
 
+// lockNativeOrderForRefund 行锁读取原生扫码订单并校验渠道，供退款状态流转复用。
+func lockNativeOrderForRefund(tx *gorm.DB, tradeNo, expectedProvider string) (*TopUp, error) {
+	refCol := "`trade_no`"
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		refCol = `"trade_no"`
+	}
+	topUp := &TopUp{}
+	if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
+		return nil, ErrTopUpNotFound
+	}
+	if topUp.PaymentProvider != expectedProvider {
+		return nil, ErrPaymentMethodMismatch
+	}
+	return topUp, nil
+}
+
+// MarkRefundPendingNativeQR 把已支付成功的订单置为退款处理中（refund_pending），不扣额度。
+// 在向渠道发起退款前调用并持久化，确保即使请求中断/服务重启，后台对账仍能接手完成结算。
+// 幂等：订单已是 refund_pending 时返回 nil；已 refunded 返回 ErrTopUpNotRefundable。
+func MarkRefundPendingNativeQR(tradeNo, expectedProvider string) error {
+	if tradeNo == "" {
+		return errors.New("未提供支付单号")
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		topUp, err := lockNativeOrderForRefund(tx, tradeNo, expectedProvider)
+		if err != nil {
+			return err
+		}
+		if topUp.Status == common.TopUpStatusRefundPending {
+			return nil
+		}
+		if topUp.Status != common.TopUpStatusSuccess {
+			return ErrTopUpNotRefundable
+		}
+		topUp.Status = common.TopUpStatusRefundPending
+		return tx.Save(topUp).Error
+	})
+}
+
+// RevertRefundPendingToSuccess 把退款处理中的订单回退为 success（渠道退款已关闭/未出款）。
+// 不涉及额度变动。幂等：非 refund_pending 状态直接返回。
+func RevertRefundPendingToSuccess(tradeNo, expectedProvider string) error {
+	if tradeNo == "" {
+		return errors.New("未提供支付单号")
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		topUp, err := lockNativeOrderForRefund(tx, tradeNo, expectedProvider)
+		if err != nil {
+			return err
+		}
+		if topUp.Status != common.TopUpStatusRefundPending {
+			return nil
+		}
+		topUp.Status = common.TopUpStatusSuccess
+		return tx.Save(topUp).Error
+	})
+}
+
+// MarkRefundFailedNativeQR 把退款处理中的订单置为退款异常终态（refund_failed），需人工处理。
+// 不涉及额度变动。幂等：非 refund_pending 状态直接返回。
+func MarkRefundFailedNativeQR(tradeNo, expectedProvider string) error {
+	if tradeNo == "" {
+		return errors.New("未提供支付单号")
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		topUp, err := lockNativeOrderForRefund(tx, tradeNo, expectedProvider)
+		if err != nil {
+			return err
+		}
+		if topUp.Status != common.TopUpStatusRefundPending {
+			return nil
+		}
+		topUp.Status = common.TopUpStatusRefundFailed
+		return tx.Save(topUp).Error
+	})
+}
+
+// GetPendingNativeRefunds 拉取退款处理中的原生扫码订单（供后台对账），按 id 升序、限量。
+func GetPendingNativeRefunds(limit int) ([]*TopUp, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var topups []*TopUp
+	err := DB.Where("status = ? AND payment_provider IN ?",
+		common.TopUpStatusRefundPending,
+		[]string{PaymentProviderWechatNative, PaymentProviderAlipayNative},
+	).Order("id asc").Limit(limit).Find(&topups).Error
+	if err != nil {
+		return nil, err
+	}
+	return topups, nil
+}
+
 // RefundNativeQR 在渠道侧退款确认成功后，原子回滚微信/支付宝原生扫码订单的本地记账：
 // 订单行锁 + 事务内状态校验，把结算时到账的额度快照（CreditedQuota）从用户余额原数扣回，
 // 标记为 refunded 并记录 RefundTime（不覆盖原支付完成时间 CompleteTime）。
@@ -335,7 +428,8 @@ func RefundNativeQR(tradeNo string, expectedProvider string, callerIp string) (a
 			alreadyDone = true
 			return nil
 		}
-		if topUp.Status != common.TopUpStatusSuccess {
+		// 允许从 success（首次结算）或 refund_pending（后台对账确认成功）结算退款
+		if topUp.Status != common.TopUpStatusSuccess && topUp.Status != common.TopUpStatusRefundPending {
 			return ErrTopUpNotRefundable
 		}
 		// 严格按结算时的到账额度快照原数扣回；无快照的历史订单拒绝自动扣回

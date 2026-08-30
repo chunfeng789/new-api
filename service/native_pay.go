@@ -35,10 +35,24 @@ const (
 	wechatRefundStatusAbnormal   = "ABNORMAL"   // 退款异常
 )
 
-// 微信退款处理中(PROCESSING)时的服务端轮询参数（约 60s，覆盖受理到确认的常见时延）。
+// 支付宝退款查询状态：退款成功返回 REFUND_SUCCESS
+const alipayRefundStatusSuccess = "REFUND_SUCCESS"
+
+// 退款申请后请求内的快速确认轮询参数（仅用于常见即时到账的 UX 优化，约 10s）。
+// 正确性不依赖此轮询：未在窗口内确认的订单落 refund_pending，由后台对账任务兜底。
 const (
 	nativeRefundPollInterval = 2 * time.Second
-	nativeRefundMaxPolls     = 30
+	nativeRefundFastPolls    = 5
+)
+
+// RefundOutcome 表示一次退款申请/查询归一化后的结果。
+type RefundOutcome int
+
+const (
+	RefundOutcomeSuccess    RefundOutcome = iota // 已确认退款成功，可安全回滚本地额度
+	RefundOutcomeProcessing                      // 受理中/结果不确定，需后台对账继续确认
+	RefundOutcomeClosed                          // 退款已关闭（未出款），可回退订单为 success
+	RefundOutcomeAbnormal                        // 退款异常，需人工到商户平台处理
 )
 
 // ---- 支付宝客户端（密钥模式，构造开销小，按需创建）----
@@ -196,23 +210,23 @@ func NativeQuery(ctx context.Context, provider, tradeNo string) (bool, error) {
 	}
 }
 
-// NativeRefund 发起并【服务端同步等待】微信/支付宝原生扫码订单的全额退款结果。
-// 返回 nil 表示已确认退款成功（可安全回滚本地额度）；返回 error 表示退款失败或未确认
-// （CLOSED/ABNORMAL/查询超时等），此时【不得】回滚额度。
-// 与 chatgpt 项目一致：轮询在服务端完成，请求返回时结果已确定，不依赖前端保持在线。
+// NativeRefundSubmit 向渠道发起微信/支付宝原生扫码订单全额退款，返回归一化结果。
+// 申请结果不确定（网络错误/非 200）时，按 out_refund_no 主动查询确认真实状态
+// （微信官方要求：申请可能已受理），避免误判为失败。error 仅用于发起前的配置/参数问题。
+// Processing 表示尚未确认，交由后台对账（ReconcilePendingNativeRefunds）继续确认。
 // refundYuan 为退款金额（元），totalYuan 为订单原金额（元，微信退款必填）。
 // out_refund_no / out_request_no 复用订单号 tradeNo，保证渠道侧幂等（重复退款不重复出款）。
-func NativeRefund(ctx context.Context, provider, tradeNo, reason string, refundYuan, totalYuan float64) error {
+func NativeRefundSubmit(ctx context.Context, provider, tradeNo, reason string, refundYuan, totalYuan float64) (RefundOutcome, error) {
 	switch provider {
 	case model.PaymentProviderWechatNative:
 		client, err := getWechatClient()
 		if err != nil {
-			return err
+			return RefundOutcomeProcessing, err
 		}
 		refundFen := decimal.NewFromFloat(refundYuan).Mul(decimal.NewFromInt(100)).Round(0).IntPart()
 		totalFen := decimal.NewFromFloat(totalYuan).Mul(decimal.NewFromInt(100)).Round(0).IntPart()
 		if refundFen <= 0 || totalFen <= 0 || refundFen > totalFen {
-			return errors.New("退款金额无效")
+			return RefundOutcomeProcessing, errors.New("退款金额无效")
 		}
 		bm := make(gopay.BodyMap)
 		bm.Set("out_trade_no", tradeNo).
@@ -222,25 +236,20 @@ func NativeRefund(ctx context.Context, provider, tradeNo, reason string, refundY
 				b.Set("refund", refundFen).Set("total", totalFen).Set("currency", "CNY")
 			})
 		rsp, err := client.V3Refund(ctx, bm)
-		if err != nil {
-			return err
+		if err != nil || rsp.Code != wechat.Success || rsp.Response == nil {
+			// 申请结果不确定：按 out_refund_no 查询确认（退款可能已受理）
+			return wechatRefundOutcomeByQuery(ctx, client, tradeNo), nil
 		}
-		if rsp.Code != wechat.Success || rsp.Response == nil {
-			return fmt.Errorf("微信退款失败: %s", rsp.Error)
+		outcome := interpretWechatRefundStatus(rsp.Response.Status)
+		if outcome == RefundOutcomeProcessing {
+			// 常见即时到账：请求内做短暂快速轮询以改善 UX；未确认则留给后台对账
+			return waitWechatRefundOutcome(ctx, client, tradeNo), nil
 		}
-		done, err := interpretWechatRefundStatus(rsp.Response.Status)
-		if err != nil {
-			return err
-		}
-		if done {
-			return nil
-		}
-		// PROCESSING：服务端轮询退款查询，直到 SUCCESS 或终态失败/超时
-		return waitWechatRefundSuccess(ctx, client, tradeNo)
+		return outcome, nil
 	case model.PaymentProviderAlipayNative:
 		client, err := newAlipayClient()
 		if err != nil {
-			return err
+			return RefundOutcomeProcessing, err
 		}
 		bm := make(gopay.BodyMap)
 		bm.Set("out_trade_no", tradeNo).
@@ -249,59 +258,104 @@ func NativeRefund(ctx context.Context, provider, tradeNo, reason string, refundY
 		if reason != "" {
 			bm.Set("refund_reason", reason)
 		}
-		// 支付宝退款为同步：业务码非 10000 时 TradeRefund 返回错误，err==nil 即到账成功
+		// 支付宝退款为同步：err==nil 即到账成功；否则按 out_request_no 查询确认真实状态
 		if _, err := client.TradeRefund(ctx, bm); err != nil {
-			return err
+			return alipayRefundOutcomeByQuery(ctx, client, tradeNo), nil
 		}
-		return nil
+		return RefundOutcomeSuccess, nil
 	default:
-		return fmt.Errorf("未知支付渠道: %s", provider)
+		return RefundOutcomeProcessing, fmt.Errorf("未知支付渠道: %s", provider)
 	}
 }
 
-// waitWechatRefundSuccess 在退款处理中(PROCESSING)时服务端轮询退款查询，
-// 直到 SUCCESS(nil) 或终态失败/超时(error)。轮询遵守 ctx 取消。
-func waitWechatRefundSuccess(ctx context.Context, client *wechat.ClientV3, tradeNo string) error {
-	for i := 0; i < nativeRefundMaxPolls; i++ {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(nativeRefundPollInterval):
+// NativeRefundQuery 主动查询退款结果（供后台对账使用）。error 仅表示本次查询临时失败
+// （网络等），调用方应保持处理中稍后重试；渠道终态通过 RefundOutcome 返回。
+func NativeRefundQuery(ctx context.Context, provider, tradeNo string) (RefundOutcome, error) {
+	switch provider {
+	case model.PaymentProviderWechatNative:
+		client, err := getWechatClient()
+		if err != nil {
+			return RefundOutcomeProcessing, err
 		}
 		rsp, err := client.V3RefundQuery(ctx, tradeNo, nil)
 		if err != nil {
-			return err
+			return RefundOutcomeProcessing, err
 		}
 		if rsp.Code != wechat.Success || rsp.Response == nil {
-			return fmt.Errorf("微信退款查询失败: %s", rsp.Error)
+			return RefundOutcomeProcessing, fmt.Errorf("微信退款查询失败: %s", rsp.Error)
 		}
-		done, err := interpretWechatRefundStatus(rsp.Response.Status)
+		return interpretWechatRefundStatus(rsp.Response.Status), nil
+	case model.PaymentProviderAlipayNative:
+		client, err := newAlipayClient()
 		if err != nil {
-			return err
+			return RefundOutcomeProcessing, err
 		}
-		if done {
-			return nil
+		bm := make(gopay.BodyMap)
+		bm.Set("out_trade_no", tradeNo).Set("out_request_no", tradeNo)
+		rsp, err := client.TradeFastPayRefundQuery(ctx, bm)
+		if err != nil {
+			return RefundOutcomeProcessing, err
 		}
+		if rsp.Response != nil && rsp.Response.RefundStatus == alipayRefundStatusSuccess {
+			return RefundOutcomeSuccess, nil
+		}
+		return RefundOutcomeProcessing, nil
+	default:
+		return RefundOutcomeProcessing, fmt.Errorf("未知支付渠道: %s", provider)
 	}
-	return errors.New("微信退款仍在处理中，请稍后重试")
 }
 
-// interpretWechatRefundStatus 归一化微信退款单状态：
-//   - done=true, err=nil：退款成功
-//   - done=false, err=nil：仍在处理中(PROCESSING)
-//   - err!=nil：终态失败(CLOSED/ABNORMAL)或未知状态
-func interpretWechatRefundStatus(status string) (done bool, err error) {
+// wechatRefundOutcomeByQuery 单次按 out_refund_no 查询微信退款结果；查询失败视为处理中。
+func wechatRefundOutcomeByQuery(ctx context.Context, client *wechat.ClientV3, tradeNo string) RefundOutcome {
+	rsp, err := client.V3RefundQuery(ctx, tradeNo, nil)
+	if err != nil || rsp.Code != wechat.Success || rsp.Response == nil {
+		return RefundOutcomeProcessing
+	}
+	return interpretWechatRefundStatus(rsp.Response.Status)
+}
+
+// waitWechatRefundOutcome 请求内短暂快速轮询微信退款查询（UX 优化）。遵守 ctx 取消；
+// 窗口内未得到终态则返回 Processing，交由后台对账继续确认。
+func waitWechatRefundOutcome(ctx context.Context, client *wechat.ClientV3, tradeNo string) RefundOutcome {
+	for i := 0; i < nativeRefundFastPolls; i++ {
+		select {
+		case <-ctx.Done():
+			return RefundOutcomeProcessing
+		case <-time.After(nativeRefundPollInterval):
+		}
+		if outcome := wechatRefundOutcomeByQuery(ctx, client, tradeNo); outcome != RefundOutcomeProcessing {
+			return outcome
+		}
+	}
+	return RefundOutcomeProcessing
+}
+
+// alipayRefundOutcomeByQuery 按 out_request_no 查询支付宝退款结果；查询失败/未成功视为处理中。
+func alipayRefundOutcomeByQuery(ctx context.Context, client *alipay.Client, tradeNo string) RefundOutcome {
+	bm := make(gopay.BodyMap)
+	bm.Set("out_trade_no", tradeNo).Set("out_request_no", tradeNo)
+	rsp, err := client.TradeFastPayRefundQuery(ctx, bm)
+	if err != nil {
+		return RefundOutcomeProcessing
+	}
+	if rsp.Response != nil && rsp.Response.RefundStatus == alipayRefundStatusSuccess {
+		return RefundOutcomeSuccess
+	}
+	return RefundOutcomeProcessing
+}
+
+// interpretWechatRefundStatus 把微信退款单状态归一化为 RefundOutcome。
+func interpretWechatRefundStatus(status string) RefundOutcome {
 	switch status {
 	case wechatRefundStatusSuccess:
-		return true, nil
-	case wechatRefundStatusProcessing:
-		return false, nil
+		return RefundOutcomeSuccess
 	case wechatRefundStatusClosed:
-		return false, errors.New("微信退款已关闭")
+		return RefundOutcomeClosed
 	case wechatRefundStatusAbnormal:
-		return false, errors.New("微信退款异常，请到商户平台处理")
+		return RefundOutcomeAbnormal
 	default:
-		return false, fmt.Errorf("微信退款状态未知: %s", status)
+		// PROCESSING 及未知状态一律按处理中，交由后台对账继续确认
+		return RefundOutcomeProcessing
 	}
 }
 

@@ -142,15 +142,25 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
 
       setRefunding(true)
       try {
-        // The backend synchronously waits for the gateway to confirm the refund
-        // before it responds, so a success response means it is fully settled.
         const response = await refundOrder({ trade_no: tradeNo })
         if (isApiSuccess(response)) {
-          toast.success(i18next.t('Order refunded successfully'))
+          // 'refund_pending' means the gateway is still processing; the backend
+          // reconciler settles it automatically, so no client polling is needed.
+          if (response.data?.status === 'refund_pending') {
+            toast.info(
+              i18next.t(
+                'Refund submitted, it will be confirmed automatically'
+              )
+            )
+          } else {
+            toast.success(i18next.t('Order refunded successfully'))
+          }
           await fetchBillingHistory()
           return true
         }
         toast.error(response.message || i18next.t('Failed to refund order'))
+        // Refresh so a reverted/failed order reflects its latest status.
+        await fetchBillingHistory()
         return false
       } catch (error) {
         // eslint-disable-next-line no-console
