@@ -31,8 +31,15 @@ const alipayTradeStatusFinished = "TRADE_FINISHED"
 // 对充值订单而言这是“确定性未支付”，供对账收敛过期。
 const alipayTradeNotExistSubCode = "ACQ.TRADE_NOT_EXIST"
 
-// 支付宝网关返回码 20000 表示系统繁忙（可重试）；其余非 10000 均为确定性业务失败。
-const alipayGatewaySystemBusyCode = "20000"
+// alipayTerminalRefundRejectSubCodes 明确的确定性退款业务拒绝 sub_code（重复提交也不会成功）→ 转人工。
+// 仅收录无歧义的参数/交易类错误；系统错误(ACQ.SYSTEM_ERROR)、卖家余额不足、重复请求、限流、网络及
+// 未知错误一律不在内，保持处理中由后台对账继续重试，避免把可恢复错误误判为永久失败、造成账目不一致。
+// 说明：支付宝退款业务失败的顶层网关码常为 40004，真实原因在 sub_code，故必须按 sub_code 判定。
+var alipayTerminalRefundRejectSubCodes = map[string]bool{
+	alipayTradeNotExistSubCode:       true, // ACQ.TRADE_NOT_EXIST 交易不存在
+	"ACQ.TRADE_STATUS_ERROR":         true, // 交易状态不合法，不可退款
+	"ACQ.REFUND_AMT_NOT_EQUAL_TOTAL": true, // 退款金额超限/不符
+}
 
 // beijingLocation 固定东八区（中国无夏令时，恒为 UTC+8，且不依赖容器 tzdata）。
 // 用于把绝对截止时间格式化为支付宝要求的北京钟面时间，服务运行在任意时区都正确。
@@ -402,12 +409,13 @@ func isTerminalWechatRefundReject(code int) bool {
 	return code >= 400 && code < 500 && code != http.StatusTooManyRequests
 }
 
-// isTerminalAlipayRefundReject 判断支付宝退款错误是否为确定性业务拒绝：
-// 网关码 20000 为系统繁忙（可重试），其余业务失败码（40001/40004 等）为确定性拒绝 → 转人工。
+// isTerminalAlipayRefundReject 判断支付宝退款错误是否为确定性业务拒绝：仅当为业务错误且其
+// sub_code 命中明确的终态拒绝集合时才转人工；ACQ.SYSTEM_ERROR、网络/传输错误及未知错误均按可重试
+// 处理（返回 false → 保持处理中，由后台对账继续确认），避免把已受理但暂不可见的退款误判为永久失败。
 func isTerminalAlipayRefundReject(err error) bool {
 	var bizErr *alipay.BizErr
 	if errors.As(err, &bizErr) {
-		return bizErr.Code != alipayGatewaySystemBusyCode
+		return alipayTerminalRefundRejectSubCodes[bizErr.SubCode]
 	}
 	// 非业务错误（网络/传输）：瞬时，可重试
 	return false
