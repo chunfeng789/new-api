@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -125,6 +126,13 @@ type OptionUpdateRequest struct {
 	Value any    `json:"value"`
 }
 
+// inviteRewardConfigMu serializes updates to the two interdependent invite-reward
+// options (the enable toggle and the suffix list) so the guard's read of the
+// current state and the subsequent write cannot interleave with a concurrent
+// update of the other key, which would otherwise leave enabled=true with an
+// empty suffix list.
+var inviteRewardConfigMu sync.Mutex
+
 func UpdateOption(c *gin.Context) {
 	var option OptionUpdateRequest
 	err := common.DecodeJson(c.Request.Body, &option)
@@ -144,6 +152,14 @@ func UpdateOption(c *gin.Context) {
 		option.Value = common.Interface2String(option.Value.(int))
 	default:
 		option.Value = fmt.Sprintf("%v", option.Value)
+	}
+	// Serialize the enable toggle and the suffix list so the invariant check and
+	// the write below are atomic with respect to a concurrent update of the other
+	// key (held until the handler returns, covering model.UpdateOption).
+	if option.Key == "InviteRewardEmailRestrictionEnabled" ||
+		option.Key == "InviteRewardEmailSuffixes" {
+		inviteRewardConfigMu.Lock()
+		defer inviteRewardConfigMu.Unlock()
 	}
 	switch option.Key {
 	case "QuotaForInviter", "QuotaForInvitee":
@@ -204,20 +220,16 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
-	case "InviteRewardEmailRestrictionEnabled":
-		if option.Value == "true" && len(common.InviteRewardEmailSuffixes) == 0 {
+	case "InviteRewardEmailRestrictionEnabled", "InviteRewardEmailSuffixes":
+		if msg := common.RejectInviteRewardChange(
+			option.Key,
+			option.Value.(string),
+			common.InviteRewardEmailRestrictionEnabled,
+			len(common.InviteRewardEmailSuffixes),
+		); msg != "" {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": "无法启用邀请奖励邮箱后缀限制，请先填入允许的邮箱后缀！",
-			})
-			return
-		}
-	case "InviteRewardEmailSuffixes":
-		if common.InviteRewardEmailRestrictionEnabled &&
-			len(common.ParseEmailSuffixes(option.Value.(string))) == 0 {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "邀请奖励邮箱后缀限制已启用，请至少保留一个有效的邮箱后缀！",
+				"message": msg,
 			})
 			return
 		}
