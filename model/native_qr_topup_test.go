@@ -256,26 +256,30 @@ func TestMarkRefundFailedFromPending(t *testing.T) {
 	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
 }
 
-// 异常退款（refund_failed）经管理员显式确认「已退款给用户」后，RefundNativeQR 据此扣回
-// 到账额度快照并置 refunded（人工判定，非按渠道状态自动推断）。
-func TestRefundNativeQRSettlesFromRefundFailedOnAdminConfirm(t *testing.T) {
+// 管理员显式确认「已退款给用户」(deduct=true)：从 refund_failed 原子扣回到账额度快照并置 refunded。
+func TestResolveRefundFailedDeductsAndMarksRefunded(t *testing.T) {
 	truncateTables(t)
 
 	user := insertUserForPaymentGuardTest(t, 637, 1_000_000)
 	order := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDFAILSETTLE", PaymentProviderWechatNative, 1_000_000, 1000)
 	require.NoError(t, MarkRefundPendingNativeQR(order.TradeNo, PaymentProviderWechatNative))
 	require.NoError(t, MarkRefundFailedNativeQR(order.TradeNo, PaymentProviderWechatNative))
-	require.Equal(t, common.TopUpStatusRefundFailed, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
 
-	alreadyDone, err := RefundNativeQR(order.TradeNo, PaymentProviderWechatNative, "127.0.0.1")
+	status, err := ResolveRefundFailedNativeQR(order.TradeNo, PaymentProviderWechatNative, true, "127.0.0.1")
 	require.NoError(t, err)
-	assert.False(t, alreadyDone)
+	assert.Equal(t, common.TopUpStatusRefunded, status)
 	assert.Equal(t, 0, getUserQuotaForPaymentGuardTest(t, user.Id))
 	assert.Equal(t, common.TopUpStatusRefunded, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+
+	// 幂等：已 refunded 再次调用回报 refunded、不二次扣额
+	status, err = ResolveRefundFailedNativeQR(order.TradeNo, PaymentProviderWechatNative, true, "127.0.0.1")
+	require.NoError(t, err)
+	assert.Equal(t, common.TopUpStatusRefunded, status)
+	assert.Equal(t, 0, getUserQuotaForPaymentGuardTest(t, user.Id))
 }
 
-// 异常退款经管理员显式确认「未退款/已作废」后，恢复为 success，不扣额度（用户保留额度）。
-func TestRestoreRefundFailedToSuccess(t *testing.T) {
+// 管理员显式确认「未退款/已作废」(deduct=false)：从 refund_failed 恢复为 success，不扣额度。
+func TestResolveRefundFailedRestoresToSuccess(t *testing.T) {
 	truncateTables(t)
 
 	user := insertUserForPaymentGuardTest(t, 638, 1_000_000)
@@ -283,12 +287,26 @@ func TestRestoreRefundFailedToSuccess(t *testing.T) {
 	require.NoError(t, MarkRefundPendingNativeQR(order.TradeNo, PaymentProviderWechatNative))
 	require.NoError(t, MarkRefundFailedNativeQR(order.TradeNo, PaymentProviderWechatNative))
 
-	require.NoError(t, RestoreRefundFailedToSuccess(order.TradeNo, PaymentProviderWechatNative))
-	assert.Equal(t, common.TopUpStatusSuccess, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+	status, err := ResolveRefundFailedNativeQR(order.TradeNo, PaymentProviderWechatNative, false, "127.0.0.1")
+	require.NoError(t, err)
+	assert.Equal(t, common.TopUpStatusSuccess, status)
 	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
+	assert.Equal(t, common.TopUpStatusSuccess, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+}
 
-	// 幂等：非 refund_failed 状态再次调用不报错、不变更
-	require.NoError(t, RestoreRefundFailedToSuccess(order.TradeNo, PaymentProviderWechatNative))
+// CAS 语义：订单已被并发操作改走（不再 refund_failed）时，返回真实状态与 ErrTopUpNotRefundFailed，
+// 且绝不扣额——守护「一实例 restore→success 后另一实例 refunded 又扣额」的跨实例竞态。
+func TestResolveRefundFailedRejectsWhenNotRefundFailed(t *testing.T) {
+	truncateTables(t)
+
+	user := insertUserForPaymentGuardTest(t, 639, 1_000_000)
+	// 订单仍是 success（模拟另一实例已 restore），不应再被 deduct=true 扣额
+	order := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDFAILCAS", PaymentProviderWechatNative, 1_000_000, 1000)
+
+	status, err := ResolveRefundFailedNativeQR(order.TradeNo, PaymentProviderWechatNative, true, "127.0.0.1")
+	require.ErrorIs(t, err, ErrTopUpNotRefundFailed)
+	assert.Equal(t, common.TopUpStatusSuccess, status)
+	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
 	assert.Equal(t, common.TopUpStatusSuccess, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
 }
 

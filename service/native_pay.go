@@ -280,20 +280,29 @@ func NativeRefundSubmit(ctx context.Context, provider, tradeNo, reason string, r
 			})
 		rsp, err := client.V3Refund(ctx, bm)
 		if err != nil {
-			// 网络/传输错误：不确定，按 out_refund_no 查询确认（退款可能已受理）
-			return wechatRefundOutcomeByQuery(ctx, client, tradeNo), nil
-		}
-		if rsp.Code != wechat.Success || rsp.Response == nil {
-			// 渠道返回非 200：先按 out_refund_no 查询确认真实状态（退款可能已受理）
-			if outcome := wechatRefundOutcomeByQuery(ctx, client, tradeNo); outcome != RefundOutcomeProcessing {
+			// 网络/传输错误：结果不确定，按 out_refund_no 查询确认。退款单已存在则以其真实状态为准，
+			// 否则保持处理中稍后重试（不因传输错误误判为拒绝）。
+			if outcome, state := wechatRefundQuery(ctx, client, tradeNo); state == refundQueryFound {
 				return outcome, nil
 			}
-			// 退款单确未创建：区分确定性业务拒绝（4xx，除 429 限频）与瞬时故障（5xx/429）。
-			// 确定性拒绝转人工，避免无效/被拒的申请永久停留处理中并反复提交。
-			if isTerminalWechatRefundReject(rsp.Code) {
-				return RefundOutcomeRejected, nil
-			}
 			return RefundOutcomeProcessing, nil
+		}
+		if rsp.Code != wechat.Success || rsp.Response == nil {
+			outcome, state := wechatRefundQuery(ctx, client, tradeNo)
+			switch state {
+			case refundQueryFound:
+				// 退款单确实存在：以其真实状态为准。含 PROCESSING → 返回处理中继续对账，
+				// 绝不因本次提交非 200 而把仍在处理的退款误判为 Rejected。
+				return outcome, nil
+			case refundQueryNotFound:
+				// 退款单确未创建：确定性业务拒绝（4xx，除 429 限频）转人工，否则瞬时故障稍后重试
+				if isTerminalWechatRefundReject(rsp.Code) {
+					return RefundOutcomeRejected, nil
+				}
+				return RefundOutcomeProcessing, nil
+			default: // refundQueryUnknown：查询也失败，无法判断，保持处理中稍后重试
+				return RefundOutcomeProcessing, nil
+			}
 		}
 		outcome := interpretWechatRefundStatus(rsp.Response.Status)
 		if outcome == RefundOutcomeProcessing && fastConfirm {
@@ -330,13 +339,29 @@ func NativeRefundSubmit(ctx context.Context, provider, tradeNo, reason string, r
 	}
 }
 
-// wechatRefundOutcomeByQuery 单次按 out_refund_no 查询微信退款结果；查询失败视为处理中。
-func wechatRefundOutcomeByQuery(ctx context.Context, client *wechat.ClientV3, tradeNo string) RefundOutcome {
+// refundQueryState 区分一次退款查询的三种情形，避免把「查询成功且退款处于 PROCESSING」
+// 与「查询失败/退款单不存在」混为一谈——前者必须继续对账，后者才可能判为确未创建。
+type refundQueryState int
+
+const (
+	refundQueryFound    refundQueryState = iota // 查询成功且退款单存在，outcome 为其真实状态
+	refundQueryNotFound                         // 查询成功但退款单不存在（404）
+	refundQueryUnknown                          // 查询失败（网络/5xx），无法判断
+)
+
+// wechatRefundQuery 按 out_refund_no 查询微信退款，返回真实状态与查询情形。
+func wechatRefundQuery(ctx context.Context, client *wechat.ClientV3, tradeNo string) (RefundOutcome, refundQueryState) {
 	rsp, err := client.V3RefundQuery(ctx, tradeNo, nil)
-	if err != nil || rsp.Code != wechat.Success || rsp.Response == nil {
-		return RefundOutcomeProcessing
+	if err != nil {
+		return RefundOutcomeProcessing, refundQueryUnknown
 	}
-	return interpretWechatRefundStatus(rsp.Response.Status)
+	if rsp.Code == http.StatusNotFound {
+		return RefundOutcomeProcessing, refundQueryNotFound
+	}
+	if rsp.Code != wechat.Success || rsp.Response == nil {
+		return RefundOutcomeProcessing, refundQueryUnknown
+	}
+	return interpretWechatRefundStatus(rsp.Response.Status), refundQueryFound
 }
 
 // waitWechatRefundOutcome 请求内短暂快速轮询微信退款查询（UX 优化）。遵守 ctx 取消；
@@ -348,7 +373,8 @@ func waitWechatRefundOutcome(ctx context.Context, client *wechat.ClientV3, trade
 			return RefundOutcomeProcessing
 		case <-time.After(nativeRefundPollInterval):
 		}
-		if outcome := wechatRefundOutcomeByQuery(ctx, client, tradeNo); outcome != RefundOutcomeProcessing {
+		if outcome, state := wechatRefundQuery(ctx, client, tradeNo); state == refundQueryFound &&
+			outcome != RefundOutcomeProcessing {
 			return outcome
 		}
 	}

@@ -767,7 +767,7 @@ func AdminResolveRefundTopUp(c *gin.Context) {
 		return
 	}
 
-	// 订单级互斥，防止与退款/对账并发
+	// 订单级互斥（同实例）；跨实例并发由 ResolveRefundFailedNativeQR 的行锁 + CAS 事务保证
 	LockOrder(req.TradeNo)
 	defer UnlockOrder(req.TradeNo)
 
@@ -780,37 +780,25 @@ func AdminResolveRefundTopUp(c *gin.Context) {
 		common.ApiErrorMsg(c, "仅支持微信/支付宝原生扫码订单")
 		return
 	}
-	// 幂等：已在收敛后的终态直接回报，重复点击不报错
-	if topUp.Status == common.TopUpStatusRefunded {
-		common.ApiSuccess(c, gin.H{"status": common.TopUpStatusRefunded})
-		return
-	}
-	if topUp.Status != common.TopUpStatusRefundFailed {
-		common.ApiErrorMsg(c, "仅退款异常的订单需要人工处理")
-		return
-	}
 
-	if req.Action == refundResolveActionRestore {
-		if err := model.RestoreRefundFailedToSuccess(topUp.TradeNo, topUp.PaymentProvider); err != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款异常恢复失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
-			common.ApiErrorMsg(c, "恢复订单失败："+err.Error())
-			return
-		}
-		common.ApiSuccess(c, gin.H{"status": common.TopUpStatusSuccess})
+	// 单事务原子收敛：状态判定与状态转换在同一行锁事务内完成，回报事务内确认的真实状态
+	deduct := req.Action == refundResolveActionRefunded
+	status, err := model.ResolveRefundFailedNativeQR(topUp.TradeNo, topUp.PaymentProvider, deduct, c.ClientIP())
+	if errors.Is(err, model.ErrTopUpNotRefundFailed) {
+		// 订单已被并发操作改走：如实回报真实状态（可能是他人已 restore 的 success 或已扣额的 refunded）
+		common.ApiErrorMsg(c, "订单状态已变化（当前："+status+"），请刷新后再处理")
 		return
 	}
-
-	// refunded：管理员确认已退款给用户，据此扣回到账额度快照
-	if topUp.CreditedQuota <= 0 {
+	if errors.Is(err, model.ErrRefundNoQuotaSnapshot) {
 		common.ApiErrorMsg(c, "该订单缺少到账额度快照，无法自动扣回，请人工核对处理")
 		return
 	}
-	if _, err := model.RefundNativeQR(topUp.TradeNo, topUp.PaymentProvider, c.ClientIP()); err != nil {
-		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款异常确认扣额失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
-		common.ApiErrorMsg(c, "扣回额度失败："+err.Error())
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款异常人工处理失败 trade_no=%s provider=%s deduct=%t error=%q", topUp.TradeNo, topUp.PaymentProvider, deduct, err.Error()))
+		common.ApiErrorMsg(c, "处理失败："+err.Error())
 		return
 	}
-	common.ApiSuccess(c, gin.H{"status": common.TopUpStatusRefunded})
+	common.ApiSuccess(c, gin.H{"status": status})
 }
 
 // ReconcileNativeRefunds 扫描退款处理中（refund_pending）的原生扫码订单，以幂等退款单号

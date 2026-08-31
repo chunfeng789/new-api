@@ -59,6 +59,7 @@ var (
 	ErrTopUpNotFound            = errors.New("topup not found")
 	ErrTopUpStatusInvalid       = errors.New("topup status invalid")
 	ErrTopUpNotRefundable       = errors.New("topup not refundable")
+	ErrTopUpNotRefundFailed     = errors.New("topup not in refund_failed state")
 	ErrRefundNoQuotaSnapshot    = errors.New("refund requires credited quota snapshot")
 	ErrInvalidTopUpQuota        = errors.New("invalid top-up quota")
 	ErrTopUpQuotaLimitExceeded  = errors.New("top-up quota limit exceeded")
@@ -368,24 +369,66 @@ func RevertRefundPendingToSuccess(tradeNo, expectedProvider string) error {
 	})
 }
 
-// RestoreRefundFailedToSuccess 把退款异常终态（refund_failed）的订单恢复为 success，
-// 供管理员显式确认「退款未发生/已作废、用户未收到退款」时调用（AdminResolveRefundTopUp）。
-// 不涉及额度变动（用户保留已充值额度）。幂等：非 refund_failed 状态直接返回。
-func RestoreRefundFailedToSuccess(tradeNo, expectedProvider string) error {
+// ResolveRefundFailedNativeQR 管理员对退款异常（refund_failed）订单做一次原子收敛：
+// 行锁 + 单事务内只允许从 refund_failed 做 CAS 转换，跨实例并发安全；返回事务内确认的最终状态。
+//   - deduct=true （已退款给用户）：按到账额度快照原数扣回，置 refunded；
+//   - deduct=false（未退款/已作废）：恢复为 success（用户保留额度）。
+//
+// 幂等：订单已是 refunded 时返回 (refunded, nil)。若订单已被并发操作改走（不再是 refund_failed），
+// 返回其真实状态与 ErrTopUpNotRefundFailed，由调用方如实回报，杜绝「回报 success 而库中实为 refunded」。
+// deduct=true 且缺到账额度快照（CreditedQuota<=0）时返回 ErrRefundNoQuotaSnapshot。
+func ResolveRefundFailedNativeQR(tradeNo, expectedProvider string, deduct bool, callerIp string) (status string, err error) {
 	if tradeNo == "" {
-		return errors.New("未提供支付单号")
+		return "", errors.New("未提供支付单号")
 	}
-	return DB.Transaction(func(tx *gorm.DB) error {
-		topUp, err := lockNativeOrderForRefund(tx, tradeNo, expectedProvider)
-		if err != nil {
-			return err
+	var quotaToDeduct int
+	topUp := &TopUp{}
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		locked, e := lockNativeOrderForRefund(tx, tradeNo, expectedProvider)
+		if e != nil {
+			return e
 		}
-		if topUp.Status != common.TopUpStatusRefundFailed {
+		*topUp = *locked
+		if topUp.Status == common.TopUpStatusRefunded {
+			// 已被（并发的）扣额收敛完成：幂等回报 refunded
+			status = common.TopUpStatusRefunded
 			return nil
 		}
-		topUp.Status = common.TopUpStatusSuccess
-		return tx.Save(topUp).Error
+		if topUp.Status != common.TopUpStatusRefundFailed {
+			// 已被并发操作改走（如另一实例 restore→success）：回报真实状态，绝不误判
+			status = topUp.Status
+			return ErrTopUpNotRefundFailed
+		}
+		if !deduct {
+			topUp.Status = common.TopUpStatusSuccess
+			status = common.TopUpStatusSuccess
+			return tx.Save(topUp).Error
+		}
+		if topUp.CreditedQuota <= 0 {
+			return ErrRefundNoQuotaSnapshot
+		}
+		quotaToDeduct = topUp.CreditedQuota
+		topUp.RefundTime = common.GetTimestamp()
+		topUp.Status = common.TopUpStatusRefunded
+		status = common.TopUpStatusRefunded
+		if e := tx.Save(topUp).Error; e != nil {
+			return e
+		}
+		return tx.Model(&User{}).
+			Where("id = ?", topUp.UserId).
+			Update("quota", gorm.Expr("quota - ?", quotaToDeduct)).Error
 	})
+	if err != nil {
+		return status, err
+	}
+	if quotaToDeduct > 0 {
+		if e := cacheDecrUserQuota(topUp.UserId, int64(quotaToDeduct)); e != nil {
+			common.SysLog("failed to sync native qr refund to user quota cache: " + e.Error())
+		}
+		common.SysLog(fmt.Sprintf("原生扫码退款成功(人工确认) trade_no=%s provider=%s user_id=%d quota_deducted=%d money=%.2f", topUp.TradeNo, expectedProvider, topUp.UserId, quotaToDeduct, topUp.Money))
+		RecordTopupLog(topUp.UserId, fmt.Sprintf("管理员确认退款成功，退回额度: %v，退款金额：%.2f", logger.LogQuota(quotaToDeduct), topUp.Money), callerIp, topUp.PaymentMethod, expectedProvider)
+	}
+	return status, nil
 }
 
 // MarkRefundFailedNativeQR 把退款处理中的订单置为退款异常终态（refund_failed），需人工处理。
@@ -476,13 +519,10 @@ func RefundNativeQR(tradeNo string, expectedProvider string, callerIp string) (a
 			alreadyDone = true
 			return nil
 		}
-		// 允许从 success（首次结算）、refund_pending（后台对账确认成功）或 refund_failed 结算退款。
-		// refund_failed 的自动对账不会走到这里（GetReconcilableNativeRefunds 只取 refund_pending），
-		// 仅当管理员在异常退款经商户平台处理后、显式确认「已退款给用户」时（AdminResolveRefundTopUp）
-		// 才据此扣额——这是人工判定而非按渠道状态自动推断，避免误伤未收到退款的用户。
-		if topUp.Status != common.TopUpStatusSuccess &&
-			topUp.Status != common.TopUpStatusRefundPending &&
-			topUp.Status != common.TopUpStatusRefundFailed {
+		// 仅允许从 success（首次结算）或 refund_pending（后台对账确认成功）结算退款。
+		// refund_failed 的人工收敛不走本函数，而由 ResolveRefundFailedNativeQR 单事务 CAS 处理，
+		// 避免「一实例 restore→success 后、另一实例又按 success 扣额」的跨实例竞态。
+		if topUp.Status != common.TopUpStatusSuccess && topUp.Status != common.TopUpStatusRefundPending {
 			return ErrTopUpNotRefundable
 		}
 		// 严格按结算时的到账额度快照原数扣回；无快照的历史订单拒绝自动扣回
