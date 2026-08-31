@@ -27,6 +27,17 @@ import (
 const alipayTradeStatusSuccess = "TRADE_SUCCESS"
 const alipayTradeStatusFinished = "TRADE_FINISHED"
 
+// 支付宝预下单后、用户扫码支付前，trade.query 返回该 sub_code（交易尚未创建）。
+// 对充值订单而言这是“确定性未支付”，供对账收敛过期。
+const alipayTradeNotExistSubCode = "ACQ.TRADE_NOT_EXIST"
+
+// 支付宝网关返回码 20000 表示系统繁忙（可重试）；其余非 10000 均为确定性业务失败。
+const alipayGatewaySystemBusyCode = "20000"
+
+// beijingLocation 固定东八区（中国无夏令时，恒为 UTC+8，且不依赖容器 tzdata）。
+// 用于把绝对截止时间格式化为支付宝要求的北京钟面时间，服务运行在任意时区都正确。
+var beijingLocation = time.FixedZone("CST", 8*60*60)
+
 // 微信 V3 退款单状态（申请退款/查询退款返回）
 const (
 	wechatRefundStatusSuccess    = "SUCCESS"    // 退款成功
@@ -58,6 +69,7 @@ const (
 	RefundOutcomeProcessing                      // 受理中/结果不确定，需后台对账继续确认
 	RefundOutcomeClosed                          // 退款已关闭（未出款），可回退订单为 success
 	RefundOutcomeAbnormal                        // 退款异常，需人工到商户平台处理
+	RefundOutcomeRejected                        // 渠道确定性业务拒绝（无效/被拒的申请，重复提交也不会成功），转人工
 )
 
 // ---- 支付宝客户端（密钥模式，构造开销小，按需创建）----
@@ -167,10 +179,10 @@ func NativePrecreate(ctx context.Context, provider, tradeNo, subject string, mon
 			Set("total_amount", decimal.NewFromFloat(moneyYuan).Round(2).String()).
 			Set("subject", subject).
 			Set("notify_url", notifyURL).
-			// 支付宝用相对超时（分钟）而非绝对 time_expire：绝对时间按支付宝服务器（北京）时区解析，
-			// 若本服务运行在 UTC 会偏移 8 小时；相对超时跨时区安全。支付宝客户端构造无网络开销，
-			// 从下单到落库的时差可忽略，与本地 expires_at 实质对齐，过期后支付宝拒付。
-			Set("timeout_express", fmt.Sprintf("%dm", NativeOrderValiditySeconds/60))
+			// 渠道侧截止时间＝本地持久化的 expires_at（与本地对账同一时刻，消除“本地先过期、渠道还能付”窗口）。
+			// 用绝对 time_expire 而非相对 timeout_express：后者从支付宝收到请求起算，仍比本地晚一个时差。
+			// time_expire 按北京时区解析，故用固定 +08:00 格式化，服务运行在任意时区都得到正确钟面时间。
+			Set("time_expire", time.Unix(expiresAt, 0).In(beijingLocation).Format("2006-01-02 15:04:05"))
 		rsp, err := client.TradePrecreate(ctx, bm)
 		if err != nil {
 			return "", err
@@ -220,6 +232,12 @@ func NativeQuery(ctx context.Context, provider, tradeNo string) (bool, error) {
 		bm.Set("out_trade_no", tradeNo)
 		rsp, err := client.TradeQuery(ctx, bm)
 		if err != nil {
+			// 支付宝预下单后、用户扫码支付前，trade.query 返回 ACQ.TRADE_NOT_EXIST（交易尚未创建）。
+			// 这是确定性未支付（也覆盖下单从未成功的孤儿订单），视为未支付以便对账收敛过期；
+			// 否则未支付的支付宝订单会因该错误被当成不确定而永久 pending、每轮反复查询。
+			if rsp != nil && rsp.Response != nil && rsp.Response.SubCode == alipayTradeNotExistSubCode {
+				return false, nil
+			}
 			return false, err
 		}
 		if rsp.Response == nil {
@@ -261,9 +279,21 @@ func NativeRefundSubmit(ctx context.Context, provider, tradeNo, reason string, r
 				b.Set("refund", refundFen).Set("total", totalFen).Set("currency", "CNY")
 			})
 		rsp, err := client.V3Refund(ctx, bm)
-		if err != nil || rsp.Code != wechat.Success || rsp.Response == nil {
-			// 申请结果不确定：按 out_refund_no 查询确认（退款可能已受理）
+		if err != nil {
+			// 网络/传输错误：不确定，按 out_refund_no 查询确认（退款可能已受理）
 			return wechatRefundOutcomeByQuery(ctx, client, tradeNo), nil
+		}
+		if rsp.Code != wechat.Success || rsp.Response == nil {
+			// 渠道返回非 200：先按 out_refund_no 查询确认真实状态（退款可能已受理）
+			if outcome := wechatRefundOutcomeByQuery(ctx, client, tradeNo); outcome != RefundOutcomeProcessing {
+				return outcome, nil
+			}
+			// 退款单确未创建：区分确定性业务拒绝（4xx，除 429 限频）与瞬时故障（5xx/429）。
+			// 确定性拒绝转人工，避免无效/被拒的申请永久停留处理中并反复提交。
+			if isTerminalWechatRefundReject(rsp.Code) {
+				return RefundOutcomeRejected, nil
+			}
+			return RefundOutcomeProcessing, nil
 		}
 		outcome := interpretWechatRefundStatus(rsp.Response.Status)
 		if outcome == RefundOutcomeProcessing && fastConfirm {
@@ -284,8 +314,15 @@ func NativeRefundSubmit(ctx context.Context, provider, tradeNo, reason string, r
 			bm.Set("refund_reason", reason)
 		}
 		// 支付宝退款为同步：err==nil 即到账成功；否则按 out_request_no 查询确认真实状态
-		if _, err := client.TradeRefund(ctx, bm); err != nil {
-			return alipayRefundOutcomeByQuery(ctx, client, tradeNo), nil
+		if _, rerr := client.TradeRefund(ctx, bm); rerr != nil {
+			if outcome := alipayRefundOutcomeByQuery(ctx, client, tradeNo); outcome != RefundOutcomeProcessing {
+				return outcome, nil
+			}
+			// 退款确未成功：确定性业务拒绝（网关码非系统繁忙）转人工，避免无效申请永久重复提交
+			if isTerminalAlipayRefundReject(rerr) {
+				return RefundOutcomeRejected, nil
+			}
+			return RefundOutcomeProcessing, nil
 		}
 		return RefundOutcomeSuccess, nil
 	default:
@@ -330,6 +367,24 @@ func alipayRefundOutcomeByQuery(ctx context.Context, client *alipay.Client, trad
 		return RefundOutcomeSuccess
 	}
 	return RefundOutcomeProcessing
+}
+
+// isTerminalWechatRefundReject 判断微信退款申请的非 200 响应是否为确定性业务拒绝：
+// 4xx（除 429 限频）为参数/权限/资源不存在等重复提交也不会成功的错误 → 转人工；
+// 429/5xx 为限频/系统故障，属瞬时可重试。
+func isTerminalWechatRefundReject(code int) bool {
+	return code >= 400 && code < 500 && code != http.StatusTooManyRequests
+}
+
+// isTerminalAlipayRefundReject 判断支付宝退款错误是否为确定性业务拒绝：
+// 网关码 20000 为系统繁忙（可重试），其余业务失败码（40001/40004 等）为确定性拒绝 → 转人工。
+func isTerminalAlipayRefundReject(err error) bool {
+	var bizErr *alipay.BizErr
+	if errors.As(err, &bizErr) {
+		return bizErr.Code != alipayGatewaySystemBusyCode
+	}
+	// 非业务错误（网络/传输）：瞬时，可重试
+	return false
 }
 
 // interpretWechatRefundStatus 把微信退款单状态归一化为 RefundOutcome。

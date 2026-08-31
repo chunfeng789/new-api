@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -644,7 +643,9 @@ func applyRefundOutcome(tradeNo, provider, callerIp string, outcome service.Refu
 			return "", err
 		}
 		return common.TopUpStatusSuccess, nil
-	case service.RefundOutcomeAbnormal:
+	case service.RefundOutcomeAbnormal, service.RefundOutcomeRejected:
+		// Abnormal：渠道退款异常；Rejected：申请被确定性业务拒绝。二者均转人工终态，
+		// 不再自动重试/扣额（refund_failed 不在对账集合，重复提交的死循环就此终止）。
 		if err := model.MarkRefundFailedNativeQR(tradeNo, provider); err != nil {
 			return "", err
 		}
@@ -788,48 +789,34 @@ func reconcileOneNativeRefund(tradeNo, provider string, refundYuan float64) {
 	}
 }
 
-var (
-	nativeReconcileOnce          sync.Once
-	nativeTopupReconcileRunning  atomic.Bool
-	nativeRefundReconcileRunning atomic.Bool
-)
+var nativeReconcileOnce sync.Once
 
 // StartNativeOrderReconciler 周期性对账微信/支付宝原生扫码订单，直到进程退出：
 //   - 待支付充值订单：主动查渠道，已支付则结算到账、超时未支付则置为过期
 //   - 退款处理中订单：以幂等退款单号重新提交/确认，成功则回滚额度
 //
-// 保证服务重启/断连/漏回调时订单仍被自动补偿。充值与退款各自独立 goroutine + 独立节流，
-// 退款对账不再排在充值全量扫描之后被阻塞。仅主节点运行（与订阅重置、鉴权清理等维护任务一致），
-// 避免多节点重复查询渠道；正确性另由订单行锁与幂等结算保证。非阻塞，由 main 直接调用。
+// 保证服务重启/断连/漏回调时订单仍被自动补偿。充值与退款各自独立 goroutine，
+// 退款对账不再排在充值全量扫描之后被阻塞。仅主节点运行（common.IsMasterNode，与订阅重置、
+// 鉴权清理等维护任务一致），减少多节点重复查询渠道；即便多个非 slave 实例同时运行，
+// 正确性也由订单行锁与幂等结算保证（重复只是多余的渠道查询，不会重复结算）。非阻塞，由 main 直接调用。
 func StartNativeOrderReconciler() {
 	nativeReconcileOnce.Do(func() {
 		if !common.IsMasterNode {
 			return
 		}
-		gopool.Go(func() {
-			runNativeReconcileLoop("充值", &nativeTopupReconcileRunning, ReconcilePendingNativeTopups)
-		})
-		gopool.Go(func() {
-			runNativeReconcileLoop("退款", &nativeRefundReconcileRunning, ReconcileNativeRefunds)
-		})
+		gopool.Go(func() { runNativeReconcileLoop(ReconcilePendingNativeTopups) })
+		gopool.Go(func() { runNativeReconcileLoop(ReconcileNativeRefunds) })
 	})
 }
 
-// runNativeReconcileLoop 以固定间隔运行一个自节流的对账循环：上一轮未结束则跳过本轮，
-// 避免订单量大、渠道超时导致的多轮叠加。供充值/退款两个对账任务复用。
-func runNativeReconcileLoop(name string, running *atomic.Bool, run func()) {
+// runNativeReconcileLoop 以固定间隔运行一个对账函数直到进程退出。单 goroutine 串行执行：
+// 若一轮耗时超过间隔，Ticker 会合并期间累积的 tick（通道缓冲为 1），下一轮在本轮结束后立即执行、
+// 不会积压，因此无需并发跳过标记。供充值/退款两个对账任务复用。
+func runNativeReconcileLoop(run func()) {
 	ticker := time.NewTicker(nativeReconcileInterval)
 	defer ticker.Stop()
-	guarded := func() {
-		if !running.CompareAndSwap(false, true) {
-			logger.LogWarn(context.Background(), "原生扫码 "+name+"对账上一轮仍在进行，跳过本轮")
-			return
-		}
-		defer running.Store(false)
-		run()
-	}
-	guarded()
+	run()
 	for range ticker.C {
-		guarded()
+		run()
 	}
 }
