@@ -432,11 +432,7 @@ func updateOptionMap(key string, value string) (err error) {
 	case "EmailDomainWhitelist":
 		common.EmailDomainWhitelist = strings.Split(value, ",")
 	case "InviteRewardEmailSuffixes":
-		if value == "" {
-			common.InviteRewardEmailSuffixes = []string{}
-		} else {
-			common.InviteRewardEmailSuffixes = strings.Split(value, ",")
-		}
+		common.InviteRewardEmailSuffixes = common.ParseEmailSuffixes(value)
 	case "SMTPServer":
 		common.SMTPServer = value
 	case "SMTPPort":

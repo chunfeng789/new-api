@@ -101,7 +101,22 @@ export function QuotaSettingsSection({
       >,
       defaultValues,
       onSubmit: async (_data, changedFields) => {
-        for (const [key, value] of Object.entries(changedFields)) {
+        // The invite-reward suffix list and its enable toggle are interdependent:
+        // the backend refuses to enable the toggle while the stored list is empty,
+        // and refuses to clear the list while the toggle is enabled. Order the
+        // per-key writes so the two never race: when enabling, persist the list
+        // first; when disabling, drop the toggle first.
+        const enabling =
+          changedFields.InviteRewardEmailRestrictionEnabled === true
+        const rankOf = (key: string): number => {
+          if (key === 'InviteRewardEmailSuffixes') return enabling ? 0 : 2
+          if (key === 'InviteRewardEmailRestrictionEnabled') return 1
+          return 1
+        }
+        const entries = Object.entries(changedFields).sort(
+          (a, b) => rankOf(a[0]) - rankOf(b[0])
+        )
+        for (const [key, value] of entries) {
           let outValue = value as string | number | boolean
           if (
             key === 'InviteRewardEmailSuffixes' &&
@@ -113,7 +128,16 @@ export function QuotaSettingsSection({
               .filter(Boolean)
               .join(',')
           }
-          await updateOption.mutateAsync({ key, value: outValue })
+          const result = await updateOption.mutateAsync({
+            key,
+            value: outValue,
+          })
+          // The API returns HTTP 200 with { success: false } on a rejected write
+          // (e.g. enabling with an empty list); stop so the form is not reset as
+          // if every change had persisted.
+          if (result && result.success === false) {
+            throw new Error(result.message || t('Failed to update setting'))
+          }
         }
       },
     })
@@ -285,7 +309,7 @@ export function QuotaSettingsSection({
                     <FormLabel>{t('Invite Reward Email Suffixes')}</FormLabel>
                     <FormControl>
                       <Textarea
-                        placeholder={t('gmail.com&#10;outlook.com')}
+                        placeholder={'gmail.com\noutlook.com'}
                         rows={4}
                         {...field}
                       />

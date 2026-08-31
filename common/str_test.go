@@ -6,6 +6,28 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// TestParseEmailSuffixes guards that the canonical suffix parser normalizes the
+// stored allowlist (trim, lower-case, drop blanks) so that the "enabled implies
+// at least one valid suffix" guard cannot be bypassed with blank or "," input.
+func TestParseEmailSuffixes(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{"empty string yields empty slice", "", []string{}},
+		{"comma only yields empty slice", ",", []string{}},
+		{"blanks are dropped", " , ,  ", []string{}},
+		{"trims and lower-cases", " Gmail.com , OUTLOOK.com ", []string{"gmail.com", "outlook.com"}},
+		{"keeps valid entries and drops blanks", "gmail.com,,outlook.com", []string{"gmail.com", "outlook.com"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ParseEmailSuffixes(tc.value))
+		})
+	}
+}
+
 // TestInviteRewardEmailAllowed guards the invite-reward eligibility boundary:
 // when the suffix restriction is off everyone qualifies (backward compatible),
 // and when it is on only emails whose domain matches a configured suffix (with

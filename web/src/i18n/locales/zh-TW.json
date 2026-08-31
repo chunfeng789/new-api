@@ -5572,7 +5572,6 @@
     "Invite Reward Email Restriction": "邀請獎勵郵箱後綴限制",
     "When enabled, only new users whose registration email matches an allowed suffix will grant invite rewards.": "啟用後，僅當新用戶的註冊郵箱後綴在名單內時，才會發放邀請獎勵。",
     "Invite Reward Email Suffixes": "邀請獎勵郵箱後綴",
-    "gmail.com&#10;outlook.com": "gmail.com&#10;outlook.com",
     "One email suffix per line (only used when the invite reward email restriction is enabled). Note: for password registration the email is stored only when email verification is enabled, otherwise those users cannot earn invite rewards.": "每行一個郵箱後綴（僅在啟用邀請獎勵郵箱後綴限制時生效）。注意：密碼註冊僅在開啟郵箱驗證時才會儲存郵箱，否則這些用戶無法獲得邀請獎勵。",
     "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "只有使用以 {{suffixes}} 結尾的郵箱註冊的被邀請用戶，才能獲得推薦獎勵。",
     "To earn the invite reward, register with an email ending in {{suffixes}}.": "使用以 {{suffixes}} 結尾的郵箱註冊即可獲得邀請獎勵。"

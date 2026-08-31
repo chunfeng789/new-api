@@ -118,6 +118,20 @@ func NormalizeBillingPreference(pref string) string {
 	}
 }
 
+// ParseEmailSuffixes 将逗号分隔的后缀名单解析为规范化（去空格、转小写、去除空项）
+// 的切片，作为邀请奖励邮箱后缀名单的唯一解析入口，保证存储配置与校验逻辑一致。
+func ParseEmailSuffixes(value string) []string {
+	parts := strings.Split(value, ",")
+	suffixes := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part != "" {
+			suffixes = append(suffixes, part)
+		}
+	}
+	return suffixes
+}
+
 // InviteRewardEmailAllowed 判断新注册用户的邮箱在后缀限制下是否有资格获得邀请奖励。
 // 当限制关闭时始终返回 true（保持向后兼容）；开启时，邮箱后缀需匹配名单中任一项，
 // 采用带 "@"/"." 边界的后缀匹配，避免 notgmail.com 命中 gmail.com。
