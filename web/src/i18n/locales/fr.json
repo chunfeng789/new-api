@@ -5568,6 +5568,12 @@
     "Zero retention": "Aucune rétention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Invite Reward Email Restriction": "Restriction d’e-mail pour la récompense de parrainage",
+    "When enabled, only new users whose registration email matches an allowed suffix will grant invite rewards.": "Lorsque cette option est activée, seuls les nouveaux utilisateurs dont l’e-mail d’inscription correspond à un suffixe autorisé génèrent des récompenses de parrainage.",
+    "Invite Reward Email Suffixes": "Suffixes d’e-mail pour la récompense de parrainage",
+    "One email suffix per line (only used when the invite reward email restriction is enabled). Note: for password registration the email is stored only when email verification is enabled, otherwise those users cannot earn invite rewards.": "Un suffixe d’e-mail par ligne (utilisé uniquement lorsque la restriction d’e-mail pour la récompense de parrainage est activée). Remarque : pour l’inscription par mot de passe, l’e-mail n’est enregistré que si la vérification par e-mail est activée, sinon ces utilisateurs ne peuvent pas obtenir de récompenses de parrainage.",
+    "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "Seuls les utilisateurs invités qui s’inscrivent avec un e-mail se terminant par {{suffixes}} obtiendront des récompenses de parrainage.",
+    "To earn the invite reward, register with an email ending in {{suffixes}}.": "Pour obtenir la récompense de parrainage, inscrivez-vous avec un e-mail se terminant par {{suffixes}}."
   }
 }

@@ -63,6 +63,13 @@ const BILLING_SECTIONS = [
           PreConsumedQuota: settings.PreConsumedQuota,
           QuotaForInviter: settings.QuotaForInviter,
           QuotaForInvitee: settings.QuotaForInvitee,
+          InviteRewardEmailRestrictionEnabled:
+            settings.InviteRewardEmailRestrictionEnabled,
+          InviteRewardEmailSuffixes: (settings.InviteRewardEmailSuffixes ?? '')
+            .split(',')
+            .map((suffix) => suffix.trim())
+            .filter(Boolean)
+            .join('\n'),
           TopUpLink: settings.TopUpLink,
           general_setting: {
             docs_link: settings['general_setting.docs_link'],

@@ -204,6 +204,12 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
+	case "InviteRewardEmailRestrictionEnabled", "InviteRewardEmailSuffixes":
+		// These two options are interdependent and must be committed together so
+		// the "enabled implies at least one valid suffix" invariant holds across
+		// instances; route single-key writes to the dedicated atomic endpoint.
+		common.ApiErrorMsg(c, "请通过邀请奖励配置接口（PUT /api/option/invite_reward）一并提交开关与后缀名单")
+		return
 	case "WeChatAuthEnabled":
 		if option.Value == "true" && common.WeChatServerAddress == "" {
 			c.JSON(http.StatusOK, gin.H{
@@ -411,6 +417,48 @@ func UpdateOption(c *gin.Context) {
 	// 出于安全考虑只记录被修改的配置项名称，不记录配置值（可能含密钥等敏感信息）。
 	recordManageAudit(c, "option.update", map[string]interface{}{
 		"key": option.Key,
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+	})
+}
+
+type inviteRewardConfigRequest struct {
+	Enabled  bool   `json:"enabled"`
+	Suffixes string `json:"suffixes"`
+}
+
+// UpdateInviteRewardConfig commits the invite-reward enable toggle and its suffix
+// list together in a single database transaction, validating the "enabled implies
+// at least one valid suffix" invariant on the exact pair being written. Because the
+// pair is written atomically and validated on the written values (not on a possibly
+// stale per-instance in-memory copy), the invariant holds across a multi-instance
+// deployment; the persisted suffix list is normalized so the DB, admin UI and
+// runtime rule stay consistent.
+func UpdateInviteRewardConfig(c *gin.Context) {
+	var req inviteRewardConfigRequest
+	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
+		common.ApiErrorMsg(c, "无效的参数")
+		return
+	}
+
+	normalized, rejectMsg := common.ValidateInviteRewardConfig(req.Enabled, req.Suffixes)
+	if rejectMsg != "" {
+		common.ApiErrorMsg(c, rejectMsg)
+		return
+	}
+
+	if err := model.UpdateOptionsBulk(map[string]string{
+		"InviteRewardEmailSuffixes":           normalized,
+		"InviteRewardEmailRestrictionEnabled": strconv.FormatBool(req.Enabled),
+	}); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	recordManageAudit(c, "option.update", map[string]interface{}{
+		"key": "InviteRewardEmailConfig",
 	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

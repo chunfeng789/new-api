@@ -34,6 +34,8 @@ interface AffiliateRewardsCardProps {
   affiliateLink: string
   onTransfer: () => void
   complianceConfirmed?: boolean
+  emailRestrictionEnabled?: boolean
+  emailSuffixes?: string
   loading?: boolean
 }
 
@@ -42,9 +44,15 @@ export function AffiliateRewardsCard({
   affiliateLink,
   onTransfer,
   complianceConfirmed = true,
+  emailRestrictionEnabled = false,
+  emailSuffixes = '',
   loading,
 }: AffiliateRewardsCardProps) {
   const { t } = useTranslation()
+  const allowedSuffixes = emailSuffixes
+    .split(',')
+    .map((suffix) => suffix.trim())
+    .filter(Boolean)
   if (loading) {
     return (
       <Card data-card-hover='false' className='bg-muted/20 py-0'>
@@ -123,6 +131,14 @@ export function AffiliateRewardsCard({
             </Button>
           )}
         </div>
+        {emailRestrictionEnabled && allowedSuffixes.length > 0 ? (
+          <p className='text-muted-foreground text-xs lg:col-span-3'>
+            {t(
+              'Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.',
+              { suffixes: allowedSuffixes.join(', ') }
+            )}
+          </p>
+        ) : null}
         {!complianceConfirmed ? (
           <p className='text-muted-foreground text-xs lg:col-span-3'>
             {t(

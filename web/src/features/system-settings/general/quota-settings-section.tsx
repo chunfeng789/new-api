@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import { Textarea } from '@/components/ui/textarea'
 import { formatQuota } from '@/lib/format'
 
 import { FormDirtyIndicator } from '../components/form-dirty-indicator'
@@ -48,13 +49,19 @@ import {
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useSettingsForm } from '../hooks/use-settings-form'
-import { useUpdateOption } from '../hooks/use-update-option'
+import {
+  useUpdateInviteRewardConfig,
+  useUpdateOption,
+} from '../hooks/use-update-option'
+import { splitQuotaSettingWrites } from './invite-reward-writes'
 
 const quotaSchema = z.object({
   QuotaForNewUser: z.coerce.number().min(0),
   PreConsumedQuota: z.coerce.number().min(0),
   QuotaForInviter: z.coerce.number().min(0),
   QuotaForInvitee: z.coerce.number().min(0),
+  InviteRewardEmailRestrictionEnabled: z.boolean(),
+  InviteRewardEmailSuffixes: z.string(),
   TopUpLink: z.string(),
   general_setting: z.object({
     docs_link: z.string(),
@@ -82,6 +89,7 @@ export function QuotaSettingsSection({
 }: QuotaSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
+  const updateInviteReward = useUpdateInviteRewardConfig()
   const handleNumberChange =
     (onChange: (value: QuotaInputValue) => void) =>
     (event: ChangeEvent<HTMLInputElement>) => {
@@ -97,12 +105,29 @@ export function QuotaSettingsSection({
         QuotaFormValues
       >,
       defaultValues,
-      onSubmit: async (_data, changedFields) => {
-        for (const [key, value] of Object.entries(changedFields)) {
-          await updateOption.mutateAsync({
+      onSubmit: async (data, changedFields) => {
+        // The invite-reward enable toggle and suffix list are interdependent, so
+        // they are committed together via the atomic endpoint; other keys are
+        // written individually. A rejected write returns { success: false } — we
+        // throw so the form is not reset as if every change had persisted.
+        const { inviteReward, otherWrites } = splitQuotaSettingWrites(
+          changedFields,
+          data
+        )
+        for (const [key, value] of otherWrites) {
+          const result = await updateOption.mutateAsync({
             key,
             value: value as string | number | boolean,
           })
+          if (result && result.success === false) {
+            throw new Error(result.message || t('Failed to update setting'))
+          }
+        }
+        if (inviteReward) {
+          const result = await updateInviteReward.mutateAsync(inviteReward)
+          if (result && result.success === false) {
+            throw new Error(result.message || t('Failed to update setting'))
+          }
         }
       },
     })
@@ -125,7 +150,11 @@ export function QuotaSettingsSection({
         <SettingsForm onSubmit={handleSubmit}>
           <SettingsPageFormActions
             onSave={handleSubmit}
-            isSaving={updateOption.isPending || isSubmitting}
+            isSaving={
+              updateOption.isPending ||
+              updateInviteReward.isPending ||
+              isSubmitting
+            }
           />
           <FormDirtyIndicator isDirty={isDirty} />
           <SettingsFormGrid>
@@ -236,6 +265,59 @@ export function QuotaSettingsSection({
                 </FormItem>
               )}
             />
+
+            <SettingsFormGridItem span='full'>
+              <FormField
+                control={form.control}
+                name='InviteRewardEmailRestrictionEnabled'
+                render={({ field }) => (
+                  <SettingsSwitchItem>
+                    <SettingsSwitchContent>
+                      <FormLabel>
+                        {t('Invite Reward Email Restriction')}
+                      </FormLabel>
+                      <FormDescription>
+                        {t(
+                          'When enabled, only new users whose registration email matches an allowed suffix will grant invite rewards.'
+                        )}
+                      </FormDescription>
+                    </SettingsSwitchContent>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                        disabled={updateInviteReward.isPending}
+                      />
+                    </FormControl>
+                  </SettingsSwitchItem>
+                )}
+              />
+            </SettingsFormGridItem>
+
+            <SettingsFormGridItem span='full'>
+              <FormField
+                control={form.control}
+                name='InviteRewardEmailSuffixes'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Invite Reward Email Suffixes')}</FormLabel>
+                    <FormControl>
+                      <Textarea
+                        placeholder={'gmail.com\noutlook.com'}
+                        rows={4}
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'One email suffix per line (only used when the invite reward email restriction is enabled). Note: for password registration the email is stored only when email verification is enabled, otherwise those users cannot earn invite rewards.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </SettingsFormGridItem>
 
             <SettingsFormGridItem span='full'>
               <FormField

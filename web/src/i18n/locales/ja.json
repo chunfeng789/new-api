@@ -5568,6 +5568,12 @@
     "Zero retention": "データ保持なし",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V 4",
-    "Zoom": "ズーム"
+    "Zoom": "ズーム",
+    "Invite Reward Email Restriction": "招待報酬のメール制限",
+    "When enabled, only new users whose registration email matches an allowed suffix will grant invite rewards.": "有効にすると、登録メールが許可された接尾辞に一致する新規ユーザーにのみ招待報酬が付与されます。",
+    "Invite Reward Email Suffixes": "招待報酬のメール接尾辞",
+    "One email suffix per line (only used when the invite reward email restriction is enabled). Note: for password registration the email is stored only when email verification is enabled, otherwise those users cannot earn invite rewards.": "1 行につき 1 つのメール接尾辞（招待報酬のメール制限が有効な場合のみ使用）。注意：パスワード登録では、メール認証が有効な場合にのみメールが保存されます。そうでない場合、これらのユーザーは招待報酬を獲得できません。",
+    "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "{{suffixes}} で終わるメールで登録した招待ユーザーのみが紹介報酬を獲得できます。",
+    "To earn the invite reward, register with an email ending in {{suffixes}}.": "招待報酬を獲得するには、{{suffixes}} で終わるメールで登録してください。"
   }
 }

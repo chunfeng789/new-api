@@ -365,6 +365,12 @@ export function Wallet(props: WalletProps) {
               complianceConfirmed={
                 topupInfo?.payment_compliance_confirmed !== false
               }
+              emailRestrictionEnabled={
+                status?.invite_reward_email_restriction_enabled === true
+              }
+              emailSuffixes={
+                (status?.invite_reward_email_suffixes as string) || ''
+              }
               loading={affiliateLoading}
             />
           </div>

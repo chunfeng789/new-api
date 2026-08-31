@@ -5568,6 +5568,12 @@
     "Zero retention": "Không lưu dữ liệu",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Invite Reward Email Restriction": "Giới hạn email cho phần thưởng mời",
+    "When enabled, only new users whose registration email matches an allowed suffix will grant invite rewards.": "Khi bật, chỉ những người dùng mới có email đăng ký khớp với hậu tố được phép mới nhận được phần thưởng mời.",
+    "Invite Reward Email Suffixes": "Hậu tố email cho phần thưởng mời",
+    "One email suffix per line (only used when the invite reward email restriction is enabled). Note: for password registration the email is stored only when email verification is enabled, otherwise those users cannot earn invite rewards.": "Mỗi dòng một hậu tố email (chỉ dùng khi bật giới hạn email cho phần thưởng mời). Lưu ý: với đăng ký bằng mật khẩu, email chỉ được lưu khi bật xác minh email, nếu không những người dùng đó không thể nhận phần thưởng mời.",
+    "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "Chỉ những người dùng được mời đăng ký bằng email kết thúc bằng {{suffixes}} mới nhận được phần thưởng giới thiệu.",
+    "To earn the invite reward, register with an email ending in {{suffixes}}.": "Để nhận phần thưởng mời, hãy đăng ký bằng email kết thúc bằng {{suffixes}}."
   }
 }
