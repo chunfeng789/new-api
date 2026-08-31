@@ -33,6 +33,9 @@ import type {
   AffiliateTransferResponse,
   BillingHistoryResponse,
   CompleteOrderRequest,
+  RefundOrderRequest,
+  RefundStatusResponse,
+  ResolveRefundRequest,
   CreemPaymentRequest,
   CreemPaymentResponse,
   NativePaymentResponse,
@@ -273,5 +276,36 @@ export async function completeOrder(
   request: CompleteOrderRequest
 ): Promise<ApiResponse> {
   const res = await api.post('/api/user/topup/complete', request)
+  return res.data
+}
+
+/**
+ * Refund a WeChat/Alipay native QR order (admin only). The response `status` is
+ * 'refunded' when the gateway already confirmed and the quota was rolled back,
+ * or 'refund_pending' when the gateway is still processing — the backend
+ * reconciler then confirms and settles it automatically (no client polling).
+ */
+export async function refundOrder(
+  request: RefundOrderRequest
+): Promise<ApiResponse<RefundStatusResponse>> {
+  const res = await api.post('/api/user/topup/refund', request, {
+    skipBusinessError: true,
+  } as Record<string, unknown>)
+  return res.data
+}
+
+/**
+ * Resolve a `refund_failed` order (admin only). An abnormal refund can return
+ * money to the user or to the merchant, and only the admin who handled it on
+ * the gateway's merchant platform knows which — so the outcome is chosen
+ * explicitly via `action` ('refunded' deducts quota and marks the order
+ * refunded; 'restore' returns the order to success without deducting).
+ */
+export async function resolveRefundOrder(
+  request: ResolveRefundRequest
+): Promise<ApiResponse<RefundStatusResponse>> {
+  const res = await api.post('/api/user/topup/refund/resolve', request, {
+    skipBusinessError: true,
+  } as Record<string, unknown>)
   return res.data
 }

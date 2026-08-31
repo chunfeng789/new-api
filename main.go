@@ -133,6 +133,13 @@ func main() {
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()
 
+	// Reconcile WeChat/Alipay native QR orders (pending top-ups and in-flight
+	// refunds) against the gateway, so a completed payment or a gateway-confirmed
+	// refund is always settled even if a callback was missed, the client closed
+	// the page, or the process restarted mid-flow. Runs on the master node only and
+	// spawns its own goroutines, so it is called directly (non-blocking).
+	controller.StartNativeOrderReconciler()
+
 	// Report this process as a system instance so the System Info page can show
 	// all currently alive nodes in multi-instance deployments.
 	service.StartSystemInstanceReporter()

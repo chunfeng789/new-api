@@ -27,9 +27,11 @@ import {
   getUserBillingHistory,
   getAllBillingHistory,
   completeOrder,
+  refundOrder,
+  resolveRefundOrder,
   isApiSuccess,
 } from '../api'
-import type { TopupRecord } from '../types'
+import type { ResolveRefundAction, TopupRecord } from '../types'
 
 // ============================================================================
 // Billing History Hook
@@ -55,6 +57,8 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
   const requestIdRef = useRef(0)
   const [loading, setLoading] = useState(false)
   const [completing, setCompleting] = useState(false)
+  const [refunding, setRefunding] = useState(false)
+  const [resolving, setResolving] = useState(false)
 
   /**
    * Fetch billing history
@@ -129,6 +133,93 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
   )
 
   /**
+   * Refund a WeChat/Alipay native QR order (admin only)
+   */
+  const handleRefundOrder = useCallback(
+    async (tradeNo: string) => {
+      if (!isAdmin) {
+        toast.error(i18next.t('Admin access required'))
+        return false
+      }
+
+      setRefunding(true)
+      try {
+        const response = await refundOrder({ trade_no: tradeNo })
+        if (isApiSuccess(response)) {
+          // 'refund_pending' means the gateway is still processing; the backend
+          // reconciler settles it automatically, so no client polling is needed.
+          if (response.data?.status === 'refund_pending') {
+            toast.info(
+              i18next.t(
+                'Refund submitted, it will be confirmed automatically'
+              )
+            )
+          } else {
+            toast.success(i18next.t('Order refunded successfully'))
+          }
+          await fetchBillingHistory()
+          return true
+        }
+        toast.error(response.message || i18next.t('Failed to refund order'))
+        // Refresh so a reverted/failed order reflects its latest status.
+        await fetchBillingHistory()
+        return false
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error('Failed to refund order:', error)
+        toast.error(i18next.t('Failed to refund order'))
+        return false
+      } finally {
+        setRefunding(false)
+      }
+    },
+    [isAdmin, fetchBillingHistory]
+  )
+
+  /**
+   * Resolve a refund_failed order explicitly (admin only). The abnormal refund
+   * was handled on the gateway's merchant platform; the admin states the
+   * outcome: 'refunded' (money returned to user → deduct quota) or 'restore'
+   * (no refund happened → return the order to success).
+   */
+  const handleResolveRefund = useCallback(
+    async (tradeNo: string, action: ResolveRefundAction) => {
+      if (!isAdmin) {
+        toast.error(i18next.t('Admin access required'))
+        return false
+      }
+
+      setResolving(true)
+      try {
+        const response = await resolveRefundOrder({
+          trade_no: tradeNo,
+          action,
+        })
+        if (isApiSuccess(response)) {
+          toast.success(
+            action === 'refunded'
+              ? i18next.t('Order refunded successfully')
+              : i18next.t('Order restored successfully')
+          )
+          await fetchBillingHistory()
+          return true
+        }
+        toast.error(response.message || i18next.t('Failed to resolve order'))
+        await fetchBillingHistory()
+        return false
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error('Failed to resolve order:', error)
+        toast.error(i18next.t('Failed to resolve order'))
+        return false
+      } finally {
+        setResolving(false)
+      }
+    },
+    [isAdmin, fetchBillingHistory]
+  )
+
+  /**
    * Change page
    */
   const handlePageChange = useCallback((newPage: number) => {
@@ -167,11 +258,15 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
     keyword,
     loading,
     completing,
+    refunding,
+    resolving,
     isAdmin,
     handlePageChange,
     handlePageSizeChange,
     handleSearch,
     handleCompleteOrder,
+    handleRefundOrder,
+    handleResolveRefund,
     refresh: fetchBillingHistory,
   }
 }

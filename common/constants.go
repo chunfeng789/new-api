@@ -264,8 +264,11 @@ const (
 )
 
 const (
-	TopUpStatusPending = "pending"
-	TopUpStatusSuccess = "success"
-	TopUpStatusFailed  = "failed"
-	TopUpStatusExpired = "expired"
+	TopUpStatusPending       = "pending"
+	TopUpStatusSuccess       = "success"
+	TopUpStatusFailed        = "failed"
+	TopUpStatusExpired       = "expired"
+	TopUpStatusRefundPending = "refund_pending" // 退款已发起，等待渠道确认（后台对账）
+	TopUpStatusRefunded      = "refunded"        // 退款成功，已回滚额度
+	TopUpStatusRefundFailed  = "refund_failed"   // 退款异常，需人工到商户平台处理
 )

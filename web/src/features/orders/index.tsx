@@ -24,6 +24,8 @@ import {
   ReceiptText,
   RefreshCw,
   Search,
+  Undo2,
+  Wrench,
 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -69,6 +71,7 @@ import {
   getStatusConfig,
 } from '../wallet/lib/billing'
 import { useBillingHistory } from '../wallet/hooks/use-billing-history'
+import type { ResolveRefundAction } from '../wallet/types'
 
 const SKELETON_ROW_KEYS = [
   'order-skeleton-1',
@@ -88,14 +91,20 @@ export function Orders() {
     keyword,
     loading,
     completing,
+    refunding,
+    resolving,
     handlePageChange,
     handlePageSizeChange,
     handleSearch,
     handleCompleteOrder,
+    handleRefundOrder,
+    handleResolveRefund,
     refresh,
   } = useBillingHistory()
 
   const [confirmTradeNo, setConfirmTradeNo] = useState<string | null>(null)
+  const [refundTradeNo, setRefundTradeNo] = useState<string | null>(null)
+  const [resolveTradeNo, setResolveTradeNo] = useState<string | null>(null)
   const { copyToClipboard, copiedText } = useCopyToClipboard({ notify: false })
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -135,6 +144,13 @@ export function Orders() {
   } else {
     tableRows = records.map((record) => {
       const statusConfig = getStatusConfig(record.status)
+      const channel = record.payment_provider || record.payment_method
+      const isNativeOrder =
+        channel === 'wechat_native' || channel === 'alipay_native'
+      const canRefund =
+        isNativeOrder &&
+        (record.status === 'success' || record.status === 'refund_pending')
+      const canResolve = isNativeOrder && record.status === 'refund_failed'
       return (
         <TableRow key={record.id} className='hover:bg-muted/30'>
           <TableCell className='px-4 py-2.5 align-middle'>
@@ -184,7 +200,7 @@ export function Orders() {
           </TableCell>
           <TableCell className='py-2.5 align-middle'>
             <StatusBadge
-              label={statusConfig.label}
+              label={t(statusConfig.label)}
               variant={statusConfig.variant}
               showDot
               copyable={false}
@@ -194,7 +210,7 @@ export function Orders() {
             {formatTimestamp(record.create_time)}
           </TableCell>
           <TableCell className='py-2.5 pr-4 text-right align-middle'>
-            {record.status === 'pending' ? (
+            {record.status === 'pending' && (
               <Button
                 size='sm'
                 variant='outline'
@@ -203,9 +219,44 @@ export function Orders() {
               >
                 {t('Complete Order')}
               </Button>
-            ) : (
-              <span className='text-muted-foreground text-xs'>-</span>
             )}
+            {canRefund && (
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() => setRefundTradeNo(record.trade_no)}
+                disabled={refunding}
+              >
+                <Undo2
+                  data-icon='inline-start'
+                  className='size-3.5'
+                  aria-hidden='true'
+                />
+                {record.status === 'refund_pending'
+                  ? t('Check Refund')
+                  : t('Refund')}
+              </Button>
+            )}
+            {canResolve && (
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() => setResolveTradeNo(record.trade_no)}
+                disabled={resolving}
+              >
+                <Wrench
+                  data-icon='inline-start'
+                  className='size-3.5'
+                  aria-hidden='true'
+                />
+                {t('Resolve')}
+              </Button>
+            )}
+            {!(
+              record.status === 'pending' ||
+              canRefund ||
+              canResolve
+            ) && <span className='text-muted-foreground text-xs'>-</span>}
           </TableCell>
         </TableRow>
       )
@@ -217,6 +268,22 @@ export function Orders() {
     const success = await handleCompleteOrder(confirmTradeNo)
     if (success) {
       setConfirmTradeNo(null)
+    }
+  }
+
+  const handleConfirmRefund = async () => {
+    if (!refundTradeNo) return
+    const success = await handleRefundOrder(refundTradeNo)
+    if (success) {
+      setRefundTradeNo(null)
+    }
+  }
+
+  const handleConfirmResolve = async (action: ResolveRefundAction) => {
+    if (!resolveTradeNo) return
+    const success = await handleResolveRefund(resolveTradeNo, action)
+    if (success) {
+      setResolveTradeNo(null)
     }
   }
 
@@ -371,6 +438,68 @@ export function Orders() {
             <AlertDialogAction onClick={handleConfirmComplete} disabled={completing}>
               {completing ? t('Processing...') : t('Confirm')}
             </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={!!refundTradeNo}
+        onOpenChange={(open) => !open && setRefundTradeNo(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('Refund Order')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(
+                'Are you sure you want to refund this order? The full amount will be returned to the payer through the payment gateway, and the credited quota will be deducted from the user. This action cannot be undone.'
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={refunding}>
+              {t('Cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmRefund} disabled={refunding}>
+              {refunding ? t('Processing...') : t('Confirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={!!resolveTradeNo}
+        onOpenChange={(open) => !open && setResolveTradeNo(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('Resolve Refund')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(
+                "This refund ended in an abnormal state and must be handled on the payment platform. Once handled, choose the actual outcome: if the money was returned to the user, deduct the credited quota; otherwise restore the order without deducting."
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className='sm:justify-between'>
+            <AlertDialogCancel disabled={resolving}>
+              {t('Cancel')}
+            </AlertDialogCancel>
+            <div className='flex flex-col gap-2 sm:flex-row'>
+              <Button
+                variant='outline'
+                onClick={() => handleConfirmResolve('restore')}
+                disabled={resolving}
+              >
+                {t('Not refunded, restore order')}
+              </Button>
+              <AlertDialogAction
+                onClick={() => handleConfirmResolve('refunded')}
+                disabled={resolving}
+              >
+                {resolving
+                  ? t('Processing...')
+                  : t('Refunded to user, deduct quota')}
+              </AlertDialogAction>
+            </div>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

@@ -256,7 +256,14 @@ export interface UserWalletData {
 /**
  * Topup record status
  */
-export type TopupStatus = 'success' | 'pending' | 'expired'
+export type TopupStatus =
+  | 'success'
+  | 'pending'
+  | 'expired'
+  | 'failed'
+  | 'refund_pending'
+  | 'refunded'
+  | 'refund_failed'
 
 /**
  * Topup billing record
@@ -274,6 +281,8 @@ export interface TopupRecord {
   trade_no: string
   /** Payment method type */
   payment_method: string
+  /** Payment provider (authoritative channel, e.g. wechat_native/alipay_native) */
+  payment_provider?: string
   /** Creation timestamp */
   create_time: number
   /** Completion timestamp */
@@ -295,4 +304,40 @@ export interface BillingHistoryResponse {
  */
 export interface CompleteOrderRequest {
   trade_no: string
+}
+
+/**
+ * Refund order request (admin only, WeChat/Alipay native QR orders)
+ */
+export interface RefundOrderRequest {
+  trade_no: string
+  /** Optional refund reason forwarded to the payment gateway */
+  reason?: string
+}
+
+/**
+ * Refund response payload. `status` is the resulting order status: 'refunded'
+ * (settled) or 'refund_pending' (gateway still processing — the backend
+ * reconciler will confirm and settle it automatically).
+ */
+export interface RefundStatusResponse {
+  status: TopupStatus
+}
+
+/**
+ * How an admin resolves a `refund_failed` order after handling the abnormal
+ * refund on the payment gateway's merchant platform:
+ * - 'refunded': the money was returned to the user → deduct the credited quota
+ *   and mark the order 'refunded'.
+ * - 'restore': the refund did not happen / was voided → restore the order to
+ *   'success' (the user keeps the quota).
+ */
+export type ResolveRefundAction = 'refunded' | 'restore'
+
+/**
+ * Resolve a `refund_failed` order request (admin only, native QR orders)
+ */
+export interface ResolveRefundRequest {
+  trade_no: string
+  action: ResolveRefundAction
 }

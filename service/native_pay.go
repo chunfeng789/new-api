@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
@@ -25,6 +26,58 @@ import (
 
 const alipayTradeStatusSuccess = "TRADE_SUCCESS"
 const alipayTradeStatusFinished = "TRADE_FINISHED"
+
+// 支付宝预下单后、用户扫码支付前，trade.query 返回该 sub_code（交易尚未创建）。
+// 对充值订单而言这是“确定性未支付”，供对账收敛过期。
+const alipayTradeNotExistSubCode = "ACQ.TRADE_NOT_EXIST"
+
+// alipayTerminalRefundRejectSubCodes 明确的确定性退款业务拒绝 sub_code（重复提交也不会成功）→ 转人工。
+// 仅收录无歧义的参数/交易类错误；系统错误(ACQ.SYSTEM_ERROR)、卖家余额不足、重复请求、限流、网络及
+// 未知错误一律不在内，保持处理中由后台对账继续重试，避免把可恢复错误误判为永久失败、造成账目不一致。
+// 说明：支付宝退款业务失败的顶层网关码常为 40004，真实原因在 sub_code，故必须按 sub_code 判定。
+var alipayTerminalRefundRejectSubCodes = map[string]bool{
+	alipayTradeNotExistSubCode:       true, // ACQ.TRADE_NOT_EXIST 交易不存在
+	"ACQ.TRADE_STATUS_ERROR":         true, // 交易状态不合法，不可退款
+	"ACQ.REFUND_AMT_NOT_EQUAL_TOTAL": true, // 退款金额超限/不符
+}
+
+// beijingLocation 固定东八区（中国无夏令时，恒为 UTC+8，且不依赖容器 tzdata）。
+// 用于把绝对截止时间格式化为支付宝要求的北京钟面时间，服务运行在任意时区都正确。
+var beijingLocation = time.FixedZone("CST", 8*60*60)
+
+// 微信 V3 退款单状态（申请退款/查询退款返回）
+const (
+	wechatRefundStatusSuccess    = "SUCCESS"    // 退款成功
+	wechatRefundStatusClosed     = "CLOSED"     // 退款关闭
+	wechatRefundStatusProcessing = "PROCESSING" // 退款处理中
+	wechatRefundStatusAbnormal   = "ABNORMAL"   // 退款异常
+)
+
+// 支付宝退款查询状态：退款成功返回 REFUND_SUCCESS
+const alipayRefundStatusSuccess = "REFUND_SUCCESS"
+
+// NativeOrderValiditySeconds 原生扫码订单有效期（秒）。下单时写入渠道截止时间
+// （微信 time_expire / 支付宝 timeout_express），使渠道在此后拒绝支付，与充值对账的
+// 本地过期判定保持一致——杜绝“本地判过期、渠道仍可付款”导致的已付款不到账窗口。
+const NativeOrderValiditySeconds int64 = 2 * 60 * 60
+
+// 退款申请后请求内的快速确认轮询参数（仅用于常见即时到账的 UX 优化，约 10s）。
+// 正确性不依赖此轮询：未在窗口内确认的订单落 refund_pending，由后台对账任务兜底。
+const (
+	nativeRefundPollInterval = 2 * time.Second
+	nativeRefundFastPolls    = 5
+)
+
+// RefundOutcome 表示一次退款申请/查询归一化后的结果。
+type RefundOutcome int
+
+const (
+	RefundOutcomeSuccess    RefundOutcome = iota // 已确认退款成功，可安全回滚本地额度
+	RefundOutcomeProcessing                      // 受理中/结果不确定，需后台对账继续确认
+	RefundOutcomeClosed                          // 退款已关闭（未出款），可回退订单为 success
+	RefundOutcomeAbnormal                        // 退款异常，需人工到商户平台处理
+	RefundOutcomeRejected                        // 渠道确定性业务拒绝（无效/被拒的申请，重复提交也不会成功），转人工
+)
 
 // ---- 支付宝客户端（密钥模式，构造开销小，按需创建）----
 
@@ -89,8 +142,10 @@ func getWechatClient() (*wechat.ClientV3, error) {
 }
 
 // NativePrecreate 统一下单，返回可生成二维码的支付串。
-// moneyYuan 为实际支付金额（人民币元）。
-func NativePrecreate(ctx context.Context, provider, tradeNo, subject string, moneyYuan float64, notifyURL string) (string, error) {
+// moneyYuan 为实际支付金额（人民币元）。expiresAt 为订单截止时间（秒级 Unix），
+// 由调用方基于订单 CreateTime 唯一计算并持久化，同时写入渠道 time_expire——
+// 保证渠道与本地对账使用同一时刻判定过期，杜绝“本地已过期、渠道仍可付款”窗口。
+func NativePrecreate(ctx context.Context, provider, tradeNo, subject string, moneyYuan float64, notifyURL string, expiresAt int64) (string, error) {
 	switch provider {
 	case model.PaymentProviderWechatNative:
 		client, err := getWechatClient()
@@ -107,6 +162,9 @@ func NativePrecreate(ctx context.Context, provider, tradeNo, subject string, mon
 			Set("description", subject).
 			Set("out_trade_no", tradeNo).
 			Set("notify_url", notifyURL).
+			// 渠道侧订单截止时间＝本地持久化的 expires_at（RFC3339 含时区偏移，跨时区安全），
+			// 与本地对账过期判定为同一时刻，过期后微信拒绝支付
+			Set("time_expire", time.Unix(expiresAt, 0).Format(time.RFC3339)).
 			SetBodyMap("amount", func(b gopay.BodyMap) {
 				b.Set("total", totalFen).Set("currency", "CNY")
 			})
@@ -127,7 +185,11 @@ func NativePrecreate(ctx context.Context, provider, tradeNo, subject string, mon
 		bm.Set("out_trade_no", tradeNo).
 			Set("total_amount", decimal.NewFromFloat(moneyYuan).Round(2).String()).
 			Set("subject", subject).
-			Set("notify_url", notifyURL)
+			Set("notify_url", notifyURL).
+			// 渠道侧截止时间＝本地持久化的 expires_at（与本地对账同一时刻，消除“本地先过期、渠道还能付”窗口）。
+			// 用绝对 time_expire 而非相对 timeout_express：后者从支付宝收到请求起算，仍比本地晚一个时差。
+			// time_expire 按北京时区解析，故用固定 +08:00 格式化，服务运行在任意时区都得到正确钟面时间。
+			Set("time_expire", time.Unix(expiresAt, 0).In(beijingLocation).Format("2006-01-02 15:04:05"))
 		rsp, err := client.TradePrecreate(ctx, bm)
 		if err != nil {
 			return "", err
@@ -156,8 +218,16 @@ func NativeQuery(ctx context.Context, provider, tradeNo string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if rsp.Code != wechat.Success || rsp.Response == nil {
+		// 404：订单在渠道侧不存在（下单从未成功/进程在下单前退出）。已创建订单即使未支付也返回
+		// 200 NOTPAY，故 404 是确定性“未支付且永不会支付”，视为未支付以便对账收敛过期，
+		// 避免这类孤儿订单永久 pending、每轮反复查询。
+		if rsp.Code == http.StatusNotFound {
 			return false, nil
+		}
+		// 其它非 200（429/5xx/鉴权失败等）为不确定，必须报错而非当成“未支付”，
+		// 否则对账会在瞬时故障下把已支付订单误判过期，造成已付款不到账。
+		if rsp.Code != wechat.Success || rsp.Response == nil {
+			return false, fmt.Errorf("微信订单查询未成功: %s", rsp.Error)
 		}
 		return rsp.Response.TradeState == wechat.TradeStateSuccess, nil
 	case model.PaymentProviderAlipayNative:
@@ -169,6 +239,12 @@ func NativeQuery(ctx context.Context, provider, tradeNo string) (bool, error) {
 		bm.Set("out_trade_no", tradeNo)
 		rsp, err := client.TradeQuery(ctx, bm)
 		if err != nil {
+			// 支付宝预下单后、用户扫码支付前，trade.query 返回 ACQ.TRADE_NOT_EXIST（交易尚未创建）。
+			// 这是确定性未支付（也覆盖下单从未成功的孤儿订单），视为未支付以便对账收敛过期；
+			// 否则未支付的支付宝订单会因该错误被当成不确定而永久 pending、每轮反复查询。
+			if rsp != nil && rsp.Response != nil && rsp.Response.SubCode == alipayTradeNotExistSubCode {
+				return false, nil
+			}
 			return false, err
 		}
 		if rsp.Response == nil {
@@ -178,6 +254,185 @@ func NativeQuery(ctx context.Context, provider, tradeNo string) (bool, error) {
 		return st == alipayTradeStatusSuccess || st == alipayTradeStatusFinished, nil
 	default:
 		return false, fmt.Errorf("未知支付渠道: %s", provider)
+	}
+}
+
+// NativeRefundSubmit 向渠道发起微信/支付宝原生扫码订单全额退款，返回归一化结果。
+// 因 out_refund_no / out_request_no 复用订单号 tradeNo，渠道侧天然幂等（重复调用不重复出款、
+// 返回既有退款单当前状态），故本函数既用于首次申请，也用于后台对账的"重新提交/确认"——
+// 即使首次申请因请求中断/服务重启从未真正发出，后台再次调用也能补发，不会永久卡在处理中。
+// 申请结果不确定（网络错误/非 200）时按 out_refund_no 主动查询确认真实状态，避免误判为失败。
+// error 仅用于发起前的配置/参数问题；Processing 表示尚未确认，交由后台对账继续确认。
+// refundYuan 为退款金额（元），totalYuan 为订单原金额（元，微信退款必填）。
+// fastConfirm=true 时（用户请求内）对微信处理中结果做短暂快速轮询以改善 UX；
+// fastConfirm=false 时（后台对账）立即返回处理中，交由下一轮对账，避免长时间持锁。
+func NativeRefundSubmit(ctx context.Context, provider, tradeNo, reason string, refundYuan, totalYuan float64, fastConfirm bool) (RefundOutcome, error) {
+	switch provider {
+	case model.PaymentProviderWechatNative:
+		client, err := getWechatClient()
+		if err != nil {
+			return RefundOutcomeProcessing, err
+		}
+		refundFen := decimal.NewFromFloat(refundYuan).Mul(decimal.NewFromInt(100)).Round(0).IntPart()
+		totalFen := decimal.NewFromFloat(totalYuan).Mul(decimal.NewFromInt(100)).Round(0).IntPart()
+		if refundFen <= 0 || totalFen <= 0 || refundFen > totalFen {
+			return RefundOutcomeProcessing, errors.New("退款金额无效")
+		}
+		bm := make(gopay.BodyMap)
+		bm.Set("out_trade_no", tradeNo).
+			Set("out_refund_no", tradeNo).
+			Set("reason", reason).
+			SetBodyMap("amount", func(b gopay.BodyMap) {
+				b.Set("refund", refundFen).Set("total", totalFen).Set("currency", "CNY")
+			})
+		rsp, err := client.V3Refund(ctx, bm)
+		if err != nil {
+			// 网络/传输错误：结果不确定，按 out_refund_no 查询确认。退款单已存在则以其真实状态为准，
+			// 否则保持处理中稍后重试（不因传输错误误判为拒绝）。
+			if outcome, state := wechatRefundQuery(ctx, client, tradeNo); state == refundQueryFound {
+				return outcome, nil
+			}
+			return RefundOutcomeProcessing, nil
+		}
+		if rsp.Code != wechat.Success || rsp.Response == nil {
+			outcome, state := wechatRefundQuery(ctx, client, tradeNo)
+			switch state {
+			case refundQueryFound:
+				// 退款单确实存在：以其真实状态为准。含 PROCESSING → 返回处理中继续对账，
+				// 绝不因本次提交非 200 而把仍在处理的退款误判为 Rejected。
+				return outcome, nil
+			case refundQueryNotFound:
+				// 退款单确未创建：确定性业务拒绝（4xx，除 429 限频）转人工，否则瞬时故障稍后重试
+				if isTerminalWechatRefundReject(rsp.Code) {
+					return RefundOutcomeRejected, nil
+				}
+				return RefundOutcomeProcessing, nil
+			default: // refundQueryUnknown：查询也失败，无法判断，保持处理中稍后重试
+				return RefundOutcomeProcessing, nil
+			}
+		}
+		outcome := interpretWechatRefundStatus(rsp.Response.Status)
+		if outcome == RefundOutcomeProcessing && fastConfirm {
+			// 常见即时到账：请求内做短暂快速轮询以改善 UX；未确认则留给后台对账
+			return waitWechatRefundOutcome(ctx, client, tradeNo), nil
+		}
+		return outcome, nil
+	case model.PaymentProviderAlipayNative:
+		client, err := newAlipayClient()
+		if err != nil {
+			return RefundOutcomeProcessing, err
+		}
+		bm := make(gopay.BodyMap)
+		bm.Set("out_trade_no", tradeNo).
+			Set("out_request_no", tradeNo).
+			Set("refund_amount", decimal.NewFromFloat(refundYuan).Round(2).String())
+		if reason != "" {
+			bm.Set("refund_reason", reason)
+		}
+		// 支付宝退款为同步：err==nil 即到账成功；否则按 out_request_no 查询确认真实状态
+		if _, rerr := client.TradeRefund(ctx, bm); rerr != nil {
+			if outcome := alipayRefundOutcomeByQuery(ctx, client, tradeNo); outcome != RefundOutcomeProcessing {
+				return outcome, nil
+			}
+			// 退款确未成功：确定性业务拒绝（网关码非系统繁忙）转人工，避免无效申请永久重复提交
+			if isTerminalAlipayRefundReject(rerr) {
+				return RefundOutcomeRejected, nil
+			}
+			return RefundOutcomeProcessing, nil
+		}
+		return RefundOutcomeSuccess, nil
+	default:
+		return RefundOutcomeProcessing, fmt.Errorf("未知支付渠道: %s", provider)
+	}
+}
+
+// refundQueryState 区分一次退款查询的三种情形，避免把「查询成功且退款处于 PROCESSING」
+// 与「查询失败/退款单不存在」混为一谈——前者必须继续对账，后者才可能判为确未创建。
+type refundQueryState int
+
+const (
+	refundQueryFound    refundQueryState = iota // 查询成功且退款单存在，outcome 为其真实状态
+	refundQueryNotFound                         // 查询成功但退款单不存在（404）
+	refundQueryUnknown                          // 查询失败（网络/5xx），无法判断
+)
+
+// wechatRefundQuery 按 out_refund_no 查询微信退款，返回真实状态与查询情形。
+func wechatRefundQuery(ctx context.Context, client *wechat.ClientV3, tradeNo string) (RefundOutcome, refundQueryState) {
+	rsp, err := client.V3RefundQuery(ctx, tradeNo, nil)
+	if err != nil {
+		return RefundOutcomeProcessing, refundQueryUnknown
+	}
+	if rsp.Code == http.StatusNotFound {
+		return RefundOutcomeProcessing, refundQueryNotFound
+	}
+	if rsp.Code != wechat.Success || rsp.Response == nil {
+		return RefundOutcomeProcessing, refundQueryUnknown
+	}
+	return interpretWechatRefundStatus(rsp.Response.Status), refundQueryFound
+}
+
+// waitWechatRefundOutcome 请求内短暂快速轮询微信退款查询（UX 优化）。遵守 ctx 取消；
+// 窗口内未得到终态则返回 Processing，交由后台对账继续确认。
+func waitWechatRefundOutcome(ctx context.Context, client *wechat.ClientV3, tradeNo string) RefundOutcome {
+	for i := 0; i < nativeRefundFastPolls; i++ {
+		select {
+		case <-ctx.Done():
+			return RefundOutcomeProcessing
+		case <-time.After(nativeRefundPollInterval):
+		}
+		if outcome, state := wechatRefundQuery(ctx, client, tradeNo); state == refundQueryFound &&
+			outcome != RefundOutcomeProcessing {
+			return outcome
+		}
+	}
+	return RefundOutcomeProcessing
+}
+
+// alipayRefundOutcomeByQuery 按 out_request_no 查询支付宝退款结果；查询失败/未成功视为处理中。
+func alipayRefundOutcomeByQuery(ctx context.Context, client *alipay.Client, tradeNo string) RefundOutcome {
+	bm := make(gopay.BodyMap)
+	bm.Set("out_trade_no", tradeNo).Set("out_request_no", tradeNo)
+	rsp, err := client.TradeFastPayRefundQuery(ctx, bm)
+	if err != nil {
+		return RefundOutcomeProcessing
+	}
+	if rsp.Response != nil && rsp.Response.RefundStatus == alipayRefundStatusSuccess {
+		return RefundOutcomeSuccess
+	}
+	return RefundOutcomeProcessing
+}
+
+// isTerminalWechatRefundReject 判断微信退款申请的非 200 响应是否为确定性业务拒绝：
+// 4xx（除 429 限频）为参数/权限/资源不存在等重复提交也不会成功的错误 → 转人工；
+// 429/5xx 为限频/系统故障，属瞬时可重试。
+func isTerminalWechatRefundReject(code int) bool {
+	return code >= 400 && code < 500 && code != http.StatusTooManyRequests
+}
+
+// isTerminalAlipayRefundReject 判断支付宝退款错误是否为确定性业务拒绝：仅当为业务错误且其
+// sub_code 命中明确的终态拒绝集合时才转人工；ACQ.SYSTEM_ERROR、网络/传输错误及未知错误均按可重试
+// 处理（返回 false → 保持处理中，由后台对账继续确认），避免把已受理但暂不可见的退款误判为永久失败。
+func isTerminalAlipayRefundReject(err error) bool {
+	var bizErr *alipay.BizErr
+	if errors.As(err, &bizErr) {
+		return alipayTerminalRefundRejectSubCodes[bizErr.SubCode]
+	}
+	// 非业务错误（网络/传输）：瞬时，可重试
+	return false
+}
+
+// interpretWechatRefundStatus 把微信退款单状态归一化为 RefundOutcome。
+func interpretWechatRefundStatus(status string) RefundOutcome {
+	switch status {
+	case wechatRefundStatusSuccess:
+		return RefundOutcomeSuccess
+	case wechatRefundStatusClosed:
+		return RefundOutcomeClosed
+	case wechatRefundStatusAbnormal:
+		return RefundOutcomeAbnormal
+	default:
+		// PROCESSING 及未知状态一律按处理中，交由后台对账继续确认
+		return RefundOutcomeProcessing
 	}
 }
 
