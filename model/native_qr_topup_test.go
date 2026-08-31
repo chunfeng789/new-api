@@ -256,23 +256,65 @@ func TestMarkRefundFailedFromPending(t *testing.T) {
 	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
 }
 
-func TestGetPendingNativeRefundsOnlyReturnsPendingNativeOrders(t *testing.T) {
+// 异常退款（refund_failed）经商户平台处理后渠道最终转 SUCCESS，对账须能据此从
+// refund_failed 状态补扣快照并置 refunded，避免"资金已退、额度仍可消费"的不一致。
+func TestRefundNativeQRSettlesFromRefundFailed(t *testing.T) {
+	truncateTables(t)
+
+	user := insertUserForPaymentGuardTest(t, 637, 1_000_000)
+	order := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDFAILSETTLE", PaymentProviderWechatNative, 1_000_000, 1000)
+	require.NoError(t, MarkRefundPendingNativeQR(order.TradeNo, PaymentProviderWechatNative))
+	require.NoError(t, MarkRefundFailedNativeQR(order.TradeNo, PaymentProviderWechatNative))
+	require.Equal(t, common.TopUpStatusRefundFailed, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+
+	alreadyDone, err := RefundNativeQR(order.TradeNo, PaymentProviderWechatNative, "reconcile")
+	require.NoError(t, err)
+	assert.False(t, alreadyDone)
+	assert.Equal(t, 0, getUserQuotaForPaymentGuardTest(t, user.Id))
+	assert.Equal(t, common.TopUpStatusRefunded, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+}
+
+// GetReconcilableNativeRefunds 返回需继续对账的原生退款订单：refund_pending 与 refund_failed
+// 都要包含（后者用于异常退款处理后补扣），排除 success 与非原生渠道。
+func TestGetReconcilableNativeRefundsReturnsPendingAndFailedNativeOrders(t *testing.T) {
 	truncateTables(t)
 
 	user := insertUserForPaymentGuardTest(t, 635, 5_000_000)
-	// 一笔处理中的微信原生订单：应被返回
+	// 一笔退款处理中的微信原生订单：应被返回
 	pendingOrder := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDPENDLIST", PaymentProviderWechatNative, 1_000_000, 1000)
 	require.NoError(t, MarkRefundPendingNativeQR(pendingOrder.TradeNo, PaymentProviderWechatNative))
+	// 一笔退款异常终态的支付宝原生订单：也应被返回
+	failedOrder := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDFAILLIST", PaymentProviderAlipayNative, 1_000_000, 1000)
+	require.NoError(t, MarkRefundPendingNativeQR(failedOrder.TradeNo, PaymentProviderAlipayNative))
+	require.NoError(t, MarkRefundFailedNativeQR(failedOrder.TradeNo, PaymentProviderAlipayNative))
 	// 一笔仍 success 的原生订单：不应被返回
-	createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDSUCCLIST", PaymentProviderAlipayNative, 1_000_000, 1000)
+	createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDSUCCLIST", PaymentProviderWechatNative, 1_000_000, 1000)
 	// 一笔非原生渠道、状态被人为置为 refund_pending 的订单：不应被返回
-	foreign := createEpayTestOrder(t, user.Id, "EPAYREFUNDPENDLIST", PaymentProviderEpay, common.TopUpStatusRefundPending)
-	_ = foreign
+	createEpayTestOrder(t, user.Id, "EPAYREFUNDPENDLIST", PaymentProviderEpay, common.TopUpStatusRefundPending)
 
-	pendings, err := GetPendingNativeRefunds(100)
+	got, err := GetReconcilableNativeRefunds(0, 100)
 	require.NoError(t, err)
-	require.Len(t, pendings, 1)
-	assert.Equal(t, "NATIVEREFUNDPENDLIST", pendings[0].TradeNo)
+	tradeNos := make([]string, 0, len(got))
+	for _, o := range got {
+		tradeNos = append(tradeNos, o.TradeNo)
+	}
+	assert.ElementsMatch(t, []string{"NATIVEREFUNDPENDLIST", "NATIVEREFUNDFAILLIST"}, tradeNos)
+}
+
+// 游标分页：afterId 之后的订单才返回，保证对账可翻页遍历全量而不饿死后续退款。
+func TestGetReconcilableNativeRefundsPaginatesByIdCursor(t *testing.T) {
+	truncateTables(t)
+
+	user := insertUserForPaymentGuardTest(t, 636, 5_000_000)
+	first := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDPAGE1", PaymentProviderWechatNative, 1_000_000, 1000)
+	require.NoError(t, MarkRefundPendingNativeQR(first.TradeNo, PaymentProviderWechatNative))
+	second := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDPAGE2", PaymentProviderWechatNative, 1_000_000, 1000)
+	require.NoError(t, MarkRefundPendingNativeQR(second.TradeNo, PaymentProviderWechatNative))
+
+	got, err := GetReconcilableNativeRefunds(first.Id, 100)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, second.TradeNo, got[0].TradeNo)
 }
 
 // GetReconcilableNativeTopups 只返回创建满 minAge 的待支付原生订单，用于充值对账。
@@ -297,7 +339,7 @@ func TestGetReconcilableNativeTopupsFiltersByAgeStatusAndProvider(t *testing.T) 
 	// 非待支付：应排除
 	insert("RECON-SUCCESS", PaymentProviderWechatNative, common.TopUpStatusSuccess, now-600)
 
-	got, err := GetReconcilableNativeTopups(300, 100)
+	got, err := GetReconcilableNativeTopups(300, 0, 100)
 	require.NoError(t, err)
 	tradeNos := make([]string, 0, len(got))
 	for _, o := range got {

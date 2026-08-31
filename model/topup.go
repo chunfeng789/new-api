@@ -383,14 +383,18 @@ func MarkRefundFailedNativeQR(tradeNo, expectedProvider string) error {
 	})
 }
 
-// GetPendingNativeRefunds 拉取退款处理中的原生扫码订单（供后台对账），按 id 升序、限量。
-func GetPendingNativeRefunds(limit int) ([]*TopUp, error) {
+// GetReconcilableNativeRefunds 拉取需继续对账的原生扫码退款订单（供后台对账）：
+// 既包含 refund_pending（等待渠道确认），也包含 refund_failed（异常退款，经商户平台处理后
+// 渠道可能最终转 SUCCESS，需补扣额度）。按 id 升序、id > afterId 做游标分页，
+// 配合调用方循环翻页可遍历全量，避免最早 N 条长时间处理中时饿死后续退款。
+func GetReconcilableNativeRefunds(afterId int, limit int) ([]*TopUp, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	var topups []*TopUp
-	err := DB.Where("status = ? AND payment_provider IN ?",
-		common.TopUpStatusRefundPending,
+	err := DB.Where("id > ? AND status IN ? AND payment_provider IN ?",
+		afterId,
+		[]string{common.TopUpStatusRefundPending, common.TopUpStatusRefundFailed},
 		[]string{PaymentProviderWechatNative, PaymentProviderAlipayNative},
 	).Order("id asc").Limit(limit).Find(&topups).Error
 	if err != nil {
@@ -400,14 +404,15 @@ func GetPendingNativeRefunds(limit int) ([]*TopUp, error) {
 }
 
 // GetReconcilableNativeTopups 拉取待支付的原生扫码充值订单（供后台对账），仅取创建满
-// minAgeSeconds 的订单以避开刚创建、用户仍在支付的订单，按 id 升序、限量。
-func GetReconcilableNativeTopups(minAgeSeconds int64, limit int) ([]*TopUp, error) {
+// minAgeSeconds 的订单以避开刚创建、用户仍在支付的订单，按 id 升序、id > afterId 游标分页。
+func GetReconcilableNativeTopups(minAgeSeconds int64, afterId int, limit int) ([]*TopUp, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	cutoff := common.GetTimestamp() - minAgeSeconds
 	var topups []*TopUp
-	err := DB.Where("status = ? AND payment_provider IN ? AND create_time <= ?",
+	err := DB.Where("id > ? AND status = ? AND payment_provider IN ? AND create_time <= ?",
+		afterId,
 		common.TopUpStatusPending,
 		[]string{PaymentProviderWechatNative, PaymentProviderAlipayNative},
 		cutoff,
@@ -447,8 +452,11 @@ func RefundNativeQR(tradeNo string, expectedProvider string, callerIp string) (a
 			alreadyDone = true
 			return nil
 		}
-		// 允许从 success（首次结算）或 refund_pending（后台对账确认成功）结算退款
-		if topUp.Status != common.TopUpStatusSuccess && topUp.Status != common.TopUpStatusRefundPending {
+		// 允许从 success（首次结算）、refund_pending（后台对账确认成功）或 refund_failed
+		// （异常退款经商户平台处理后渠道最终转 SUCCESS，对账补扣）结算退款
+		if topUp.Status != common.TopUpStatusSuccess &&
+			topUp.Status != common.TopUpStatusRefundPending &&
+			topUp.Status != common.TopUpStatusRefundFailed {
 			return ErrTopUpNotRefundable
 		}
 		// 严格按结算时的到账额度快照原数扣回；无快照的历史订单拒绝自动扣回

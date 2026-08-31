@@ -710,7 +710,7 @@ func AdminRefundTopUp(c *gin.Context) {
 
 	// 向渠道发起退款并做短暂快速确认；金额以本地订单为准防篡改。
 	// 申请不确定时内部会按 out_refund_no 查询确认；error 仅表示发起前的配置/参数问题。
-	outcome, err := service.NativeRefundSubmit(c.Request.Context(), topUp.PaymentProvider, topUp.TradeNo, reason, topUp.Money, topUp.Money)
+	outcome, err := service.NativeRefundSubmit(c.Request.Context(), topUp.PaymentProvider, topUp.TradeNo, reason, topUp.Money, topUp.Money, true)
 	if err != nil {
 		// 尚未真正发起，回退处理中状态，避免订单空挂
 		_ = model.RevertRefundPendingToSuccess(topUp.TradeNo, topUp.PaymentProvider)
@@ -737,35 +737,48 @@ func AdminRefundTopUp(c *gin.Context) {
 	}
 }
 
-// ReconcileNativeRefunds 扫描处于退款处理中的原生扫码订单，向渠道查询并推进结算。
-// 脱离用户请求运行，保证渠道最终退款成功后本地额度一定被回滚（重启/断连不丢单）。
+// ReconcileNativeRefunds 扫描需继续对账的原生扫码退款订单（refund_pending 与 refund_failed），
+// 以幂等退款单号重新提交/确认并推进结算。脱离用户请求运行，保证渠道最终退款成功后本地额度
+// 一定被回滚（重启/断连/首次申请从未真正发出都不丢单），异常退款经人工处理后也能自动补扣。
+// 用 id 游标翻页遍历全量，避免最早 N 条长时间处理中时饿死后续退款。
 func ReconcileNativeRefunds() {
-	orders, err := model.GetPendingNativeRefunds(nativeReconcileBatch)
-	if err != nil {
-		common.SysError("原生扫码 退款对账拉取订单失败: " + err.Error())
-		return
-	}
-	for _, order := range orders {
-		reconcileOneNativeRefund(order.TradeNo, order.PaymentProvider)
+	afterId := 0
+	for {
+		orders, err := model.GetReconcilableNativeRefunds(afterId, nativeReconcileBatch)
+		if err != nil {
+			common.SysError("原生扫码 退款对账拉取订单失败: " + err.Error())
+			return
+		}
+		for _, order := range orders {
+			reconcileOneNativeRefund(order.TradeNo, order.PaymentProvider, order.Money)
+			if order.Id > afterId {
+				afterId = order.Id
+			}
+		}
+		if len(orders) < nativeReconcileBatch {
+			return
+		}
 	}
 }
 
-func reconcileOneNativeRefund(tradeNo, provider string) {
+func reconcileOneNativeRefund(tradeNo, provider string, refundYuan float64) {
 	LockOrder(tradeNo)
 	defer UnlockOrder(tradeNo)
 
 	// 加锁后重读，避免与退款接口/其它对账并发
 	cur := model.GetTopUpByTradeNo(tradeNo)
-	if cur == nil || cur.Status != common.TopUpStatusRefundPending {
+	if cur == nil || (cur.Status != common.TopUpStatusRefundPending && cur.Status != common.TopUpStatusRefundFailed) {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), nativeReconcileQueryTimeout)
 	defer cancel()
-	outcome, err := service.NativeRefundQuery(ctx, provider, tradeNo)
+	// 以幂等退款单号（out_refund_no=trade_no）重新提交/确认：首次申请若因中断/重启从未真正发出，
+	// 在此补发；已受理的退款则返回既有退款单当前状态。金额以本地订单为准，fastConfirm=false 不在对账内长轮询。
+	outcome, err := service.NativeRefundSubmit(ctx, provider, tradeNo, "管理员退款", refundYuan, refundYuan, false)
 	if err != nil {
-		// 临时查询失败：保持处理中，下一轮再试
-		logger.LogWarn(ctx, fmt.Sprintf("原生扫码 退款对账查询失败 trade_no=%s provider=%s error=%q", tradeNo, provider, err.Error()))
+		// 发起前的配置/参数问题（非渠道结果）：保持当前状态，下一轮再试
+		logger.LogWarn(ctx, fmt.Sprintf("原生扫码 退款对账提交失败 trade_no=%s provider=%s error=%q", tradeNo, provider, err.Error()))
 		return
 	}
 	if _, err := applyRefundOutcome(tradeNo, provider, "reconcile", outcome); err != nil {

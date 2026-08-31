@@ -225,24 +225,32 @@ func AlipayNativeNotify(c *gin.Context) {
 	_, _ = c.Writer.WriteString("success")
 }
 
-// 充值订单对账参数：仅对账创建满 MinAge 的待支付订单（避开用户仍在支付的新订单）；
-// 超过 ExpireAge 仍未支付的订单在渠道确认未支付后置为过期（扫码二维码通常 2h 失效）。
-const (
-	nativeTopupReconcileMinAge int64 = 2 * 60
-	nativeTopupExpireAge       int64 = 2 * 60 * 60
-)
+// 充值订单对账参数：仅对账创建满 MinAge 的待支付订单（避开用户仍在支付的新订单）。
+// 过期判定复用渠道下单时写入的有效期 service.NativeOrderValiditySeconds，保证本地判过期时
+// 渠道也已拒绝支付，不会出现“本地已过期、渠道仍可付款”导致的已付款不到账。
+const nativeTopupReconcileMinAge int64 = 2 * 60
 
 // ReconcilePendingNativeTopups 扫描待支付的原生扫码充值订单，主动向渠道查询：
 // 已支付则幂等结算到账（覆盖漏回调/用户关页/服务重启期间完成的支付）；
-// 超时仍未支付则置为过期，避免对账集合无限增长。脱离用户请求运行。
+// 渠道确认未支付且已过有效期则置为过期，避免对账集合无限增长。脱离用户请求运行。
+// 用 id 游标翻页遍历全量，避免最早 N 条长期滞留时饿死后续订单。
 func ReconcilePendingNativeTopups() {
-	orders, err := model.GetReconcilableNativeTopups(nativeTopupReconcileMinAge, nativeReconcileBatch)
-	if err != nil {
-		common.SysError("原生扫码 充值对账拉取订单失败: " + err.Error())
-		return
-	}
-	for _, order := range orders {
-		reconcileOnePendingNativeTopup(order.TradeNo, order.PaymentProvider, order.CreateTime)
+	afterId := 0
+	for {
+		orders, err := model.GetReconcilableNativeTopups(nativeTopupReconcileMinAge, afterId, nativeReconcileBatch)
+		if err != nil {
+			common.SysError("原生扫码 充值对账拉取订单失败: " + err.Error())
+			return
+		}
+		for _, order := range orders {
+			reconcileOnePendingNativeTopup(order.TradeNo, order.PaymentProvider, order.CreateTime)
+			if order.Id > afterId {
+				afterId = order.Id
+			}
+		}
+		if len(orders) < nativeReconcileBatch {
+			return
+		}
 	}
 }
 
@@ -269,8 +277,9 @@ func reconcileOnePendingNativeTopup(tradeNo, provider string, createTime int64) 
 		}
 		return
 	}
-	// 未支付且二维码已过有效期：置为过期，收敛待对账集合（已支付订单不会走到这里）
-	if common.GetTimestamp()-createTime >= nativeTopupExpireAge {
+	// 未支付且已过渠道有效期：置为过期，收敛待对账集合（已支付订单不会走到这里；
+	// 查询非确定性失败已在上面 return，不会误判过期）
+	if common.GetTimestamp()-createTime >= service.NativeOrderValiditySeconds {
 		if err := model.UpdatePendingTopUpStatus(tradeNo, provider, common.TopUpStatusExpired); err != nil {
 			logger.LogWarn(ctx, fmt.Sprintf("原生扫码 充值对账置过期失败 trade_no=%s provider=%s error=%q", tradeNo, provider, err.Error()))
 		}
