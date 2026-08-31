@@ -28,9 +28,10 @@ import {
   getAllBillingHistory,
   completeOrder,
   refundOrder,
+  resolveRefundOrder,
   isApiSuccess,
 } from '../api'
-import type { TopupRecord } from '../types'
+import type { ResolveRefundAction, TopupRecord } from '../types'
 
 // ============================================================================
 // Billing History Hook
@@ -57,6 +58,7 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
   const [loading, setLoading] = useState(false)
   const [completing, setCompleting] = useState(false)
   const [refunding, setRefunding] = useState(false)
+  const [resolving, setResolving] = useState(false)
 
   /**
    * Fetch billing history
@@ -175,6 +177,49 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
   )
 
   /**
+   * Resolve a refund_failed order explicitly (admin only). The abnormal refund
+   * was handled on the gateway's merchant platform; the admin states the
+   * outcome: 'refunded' (money returned to user → deduct quota) or 'restore'
+   * (no refund happened → return the order to success).
+   */
+  const handleResolveRefund = useCallback(
+    async (tradeNo: string, action: ResolveRefundAction) => {
+      if (!isAdmin) {
+        toast.error(i18next.t('Admin access required'))
+        return false
+      }
+
+      setResolving(true)
+      try {
+        const response = await resolveRefundOrder({
+          trade_no: tradeNo,
+          action,
+        })
+        if (isApiSuccess(response)) {
+          toast.success(
+            action === 'refunded'
+              ? i18next.t('Order refunded successfully')
+              : i18next.t('Order restored successfully')
+          )
+          await fetchBillingHistory()
+          return true
+        }
+        toast.error(response.message || i18next.t('Failed to resolve order'))
+        await fetchBillingHistory()
+        return false
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error('Failed to resolve order:', error)
+        toast.error(i18next.t('Failed to resolve order'))
+        return false
+      } finally {
+        setResolving(false)
+      }
+    },
+    [isAdmin, fetchBillingHistory]
+  )
+
+  /**
    * Change page
    */
   const handlePageChange = useCallback((newPage: number) => {
@@ -214,12 +259,14 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
     loading,
     completing,
     refunding,
+    resolving,
     isAdmin,
     handlePageChange,
     handlePageSizeChange,
     handleSearch,
     handleCompleteOrder,
     handleRefundOrder,
+    handleResolveRefund,
     refresh: fetchBillingHistory,
   }
 }

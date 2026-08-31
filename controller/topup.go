@@ -740,6 +740,79 @@ func AdminRefundTopUp(c *gin.Context) {
 	}
 }
 
+// 退款异常（refund_failed）的人工处理动作。
+const (
+	refundResolveActionRefunded = "refunded" // 已退款给用户 → 扣回额度并置 refunded
+	refundResolveActionRestore  = "restore"  // 未退款/已作废 → 恢复订单为 success，不扣额度
+)
+
+type AdminResolveRefundRequest struct {
+	TradeNo string `json:"trade_no"`
+	Action  string `json:"action"`
+}
+
+// AdminResolveRefundTopUp 管理员对退款异常（refund_failed）的原生扫码订单做显式收敛。
+// 微信异常退款可退至用户或退至商户账户，款项是否真正退给了用户只有经手的管理员知道，
+// 渠道状态无法可靠区分，故不自动推断，改由管理员按实际结果二选一：
+//   - refunded：已退款给用户 → 扣回该订单到账额度快照并置 refunded
+//   - restore ：未退款/退款作废 → 恢复订单为 success（用户保留额度），管理员可另行重试退款
+func AdminResolveRefundTopUp(c *gin.Context) {
+	var req AdminResolveRefundRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.TradeNo == "" {
+		common.ApiErrorMsg(c, "参数错误")
+		return
+	}
+	if req.Action != refundResolveActionRefunded && req.Action != refundResolveActionRestore {
+		common.ApiErrorMsg(c, "无效的处理动作")
+		return
+	}
+
+	// 订单级互斥，防止与退款/对账并发
+	LockOrder(req.TradeNo)
+	defer UnlockOrder(req.TradeNo)
+
+	topUp := model.GetTopUpByTradeNo(req.TradeNo)
+	if topUp == nil {
+		common.ApiErrorMsg(c, "订单不存在")
+		return
+	}
+	if !isNativeQROrder(topUp) {
+		common.ApiErrorMsg(c, "仅支持微信/支付宝原生扫码订单")
+		return
+	}
+	// 幂等：已在收敛后的终态直接回报，重复点击不报错
+	if topUp.Status == common.TopUpStatusRefunded {
+		common.ApiSuccess(c, gin.H{"status": common.TopUpStatusRefunded})
+		return
+	}
+	if topUp.Status != common.TopUpStatusRefundFailed {
+		common.ApiErrorMsg(c, "仅退款异常的订单需要人工处理")
+		return
+	}
+
+	if req.Action == refundResolveActionRestore {
+		if err := model.RestoreRefundFailedToSuccess(topUp.TradeNo, topUp.PaymentProvider); err != nil {
+			logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款异常恢复失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
+			common.ApiErrorMsg(c, "恢复订单失败："+err.Error())
+			return
+		}
+		common.ApiSuccess(c, gin.H{"status": common.TopUpStatusSuccess})
+		return
+	}
+
+	// refunded：管理员确认已退款给用户，据此扣回到账额度快照
+	if topUp.CreditedQuota <= 0 {
+		common.ApiErrorMsg(c, "该订单缺少到账额度快照，无法自动扣回，请人工核对处理")
+		return
+	}
+	if _, err := model.RefundNativeQR(topUp.TradeNo, topUp.PaymentProvider, c.ClientIP()); err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 退款异常确认扣额失败 trade_no=%s provider=%s error=%q", topUp.TradeNo, topUp.PaymentProvider, err.Error()))
+		common.ApiErrorMsg(c, "扣回额度失败："+err.Error())
+		return
+	}
+	common.ApiSuccess(c, gin.H{"status": common.TopUpStatusRefunded})
+}
+
 // ReconcileNativeRefunds 扫描退款处理中（refund_pending）的原生扫码订单，以幂等退款单号
 // 重新提交/确认并推进结算。脱离用户请求运行，保证渠道最终退款成功后本地额度一定被回滚
 // （重启/断连/首次申请从未真正发出都不丢单）。异常退款（refund_failed）为人工终态，不在此自动处理。

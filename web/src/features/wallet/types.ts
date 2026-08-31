@@ -323,3 +323,21 @@ export interface RefundOrderRequest {
 export interface RefundStatusResponse {
   status: TopupStatus
 }
+
+/**
+ * How an admin resolves a `refund_failed` order after handling the abnormal
+ * refund on the payment gateway's merchant platform:
+ * - 'refunded': the money was returned to the user → deduct the credited quota
+ *   and mark the order 'refunded'.
+ * - 'restore': the refund did not happen / was voided → restore the order to
+ *   'success' (the user keeps the quota).
+ */
+export type ResolveRefundAction = 'refunded' | 'restore'
+
+/**
+ * Resolve a `refund_failed` order request (admin only, native QR orders)
+ */
+export interface ResolveRefundRequest {
+  trade_no: string
+  action: ResolveRefundAction
+}

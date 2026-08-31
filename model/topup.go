@@ -368,6 +368,26 @@ func RevertRefundPendingToSuccess(tradeNo, expectedProvider string) error {
 	})
 }
 
+// RestoreRefundFailedToSuccess 把退款异常终态（refund_failed）的订单恢复为 success，
+// 供管理员显式确认「退款未发生/已作废、用户未收到退款」时调用（AdminResolveRefundTopUp）。
+// 不涉及额度变动（用户保留已充值额度）。幂等：非 refund_failed 状态直接返回。
+func RestoreRefundFailedToSuccess(tradeNo, expectedProvider string) error {
+	if tradeNo == "" {
+		return errors.New("未提供支付单号")
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		topUp, err := lockNativeOrderForRefund(tx, tradeNo, expectedProvider)
+		if err != nil {
+			return err
+		}
+		if topUp.Status != common.TopUpStatusRefundFailed {
+			return nil
+		}
+		topUp.Status = common.TopUpStatusSuccess
+		return tx.Save(topUp).Error
+	})
+}
+
 // MarkRefundFailedNativeQR 把退款处理中的订单置为退款异常终态（refund_failed），需人工处理。
 // 不涉及额度变动。幂等：非 refund_pending 状态直接返回。
 func MarkRefundFailedNativeQR(tradeNo, expectedProvider string) error {
@@ -456,11 +476,13 @@ func RefundNativeQR(tradeNo string, expectedProvider string, callerIp string) (a
 			alreadyDone = true
 			return nil
 		}
-		// 允许从 success（首次结算）或 refund_pending（后台对账确认成功）结算退款。
-		// refund_failed（异常退款）不自动扣额：微信异常退款可退至用户或退至商户账户，
-		// 仅凭状态 SUCCESS 无法确认款项确实退给了用户，自动扣额会误伤未收到退款的用户，
-		// 因此保持人工处理（详见渠道商户平台）。
-		if topUp.Status != common.TopUpStatusSuccess && topUp.Status != common.TopUpStatusRefundPending {
+		// 允许从 success（首次结算）、refund_pending（后台对账确认成功）或 refund_failed 结算退款。
+		// refund_failed 的自动对账不会走到这里（GetReconcilableNativeRefunds 只取 refund_pending），
+		// 仅当管理员在异常退款经商户平台处理后、显式确认「已退款给用户」时（AdminResolveRefundTopUp）
+		// 才据此扣额——这是人工判定而非按渠道状态自动推断，避免误伤未收到退款的用户。
+		if topUp.Status != common.TopUpStatusSuccess &&
+			topUp.Status != common.TopUpStatusRefundPending &&
+			topUp.Status != common.TopUpStatusRefundFailed {
 			return ErrTopUpNotRefundable
 		}
 		// 严格按结算时的到账额度快照原数扣回；无快照的历史订单拒绝自动扣回
