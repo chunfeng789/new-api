@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -126,13 +125,6 @@ type OptionUpdateRequest struct {
 	Value any    `json:"value"`
 }
 
-// inviteRewardConfigMu serializes updates to the two interdependent invite-reward
-// options (the enable toggle and the suffix list) so the guard's read of the
-// current state and the subsequent write cannot interleave with a concurrent
-// update of the other key, which would otherwise leave enabled=true with an
-// empty suffix list.
-var inviteRewardConfigMu sync.Mutex
-
 func UpdateOption(c *gin.Context) {
 	var option OptionUpdateRequest
 	err := common.DecodeJson(c.Request.Body, &option)
@@ -152,14 +144,6 @@ func UpdateOption(c *gin.Context) {
 		option.Value = common.Interface2String(option.Value.(int))
 	default:
 		option.Value = fmt.Sprintf("%v", option.Value)
-	}
-	// Serialize the enable toggle and the suffix list so the invariant check and
-	// the write below are atomic with respect to a concurrent update of the other
-	// key (held until the handler returns, covering model.UpdateOption).
-	if option.Key == "InviteRewardEmailRestrictionEnabled" ||
-		option.Key == "InviteRewardEmailSuffixes" {
-		inviteRewardConfigMu.Lock()
-		defer inviteRewardConfigMu.Unlock()
 	}
 	switch option.Key {
 	case "QuotaForInviter", "QuotaForInvitee":
@@ -221,18 +205,11 @@ func UpdateOption(c *gin.Context) {
 			return
 		}
 	case "InviteRewardEmailRestrictionEnabled", "InviteRewardEmailSuffixes":
-		if msg := common.RejectInviteRewardChange(
-			option.Key,
-			option.Value.(string),
-			common.InviteRewardEmailRestrictionEnabled,
-			len(common.InviteRewardEmailSuffixes),
-		); msg != "" {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": msg,
-			})
-			return
-		}
+		// These two options are interdependent and must be committed together so
+		// the "enabled implies at least one valid suffix" invariant holds across
+		// instances; route single-key writes to the dedicated atomic endpoint.
+		common.ApiErrorMsg(c, "请通过邀请奖励配置接口（PUT /api/option/invite_reward）一并提交开关与后缀名单")
+		return
 	case "WeChatAuthEnabled":
 		if option.Value == "true" && common.WeChatServerAddress == "" {
 			c.JSON(http.StatusOK, gin.H{
@@ -440,6 +417,48 @@ func UpdateOption(c *gin.Context) {
 	// 出于安全考虑只记录被修改的配置项名称，不记录配置值（可能含密钥等敏感信息）。
 	recordManageAudit(c, "option.update", map[string]interface{}{
 		"key": option.Key,
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+	})
+}
+
+type inviteRewardConfigRequest struct {
+	Enabled  bool   `json:"enabled"`
+	Suffixes string `json:"suffixes"`
+}
+
+// UpdateInviteRewardConfig commits the invite-reward enable toggle and its suffix
+// list together in a single database transaction, validating the "enabled implies
+// at least one valid suffix" invariant on the exact pair being written. Because the
+// pair is written atomically and validated on the written values (not on a possibly
+// stale per-instance in-memory copy), the invariant holds across a multi-instance
+// deployment; the persisted suffix list is normalized so the DB, admin UI and
+// runtime rule stay consistent.
+func UpdateInviteRewardConfig(c *gin.Context) {
+	var req inviteRewardConfigRequest
+	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
+		common.ApiErrorMsg(c, "无效的参数")
+		return
+	}
+
+	normalized, rejectMsg := common.ValidateInviteRewardConfig(req.Enabled, req.Suffixes)
+	if rejectMsg != "" {
+		common.ApiErrorMsg(c, rejectMsg)
+		return
+	}
+
+	if err := model.UpdateOptionsBulk(map[string]string{
+		"InviteRewardEmailSuffixes":           normalized,
+		"InviteRewardEmailRestrictionEnabled": strconv.FormatBool(req.Enabled),
+	}); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	recordManageAudit(c, "option.update", map[string]interface{}{
+		"key": "InviteRewardEmailConfig",
 	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

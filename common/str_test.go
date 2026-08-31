@@ -26,7 +26,10 @@ func TestParseEmailSuffixes(t *testing.T) {
 		{"drops values containing spaces", "gmail com", []string{}},
 		{"drops values with empty labels", "gmail..com", []string{}},
 		{"drops trailing-dot values", "gmail.com.", []string{}},
+		{"drops a label ending in a hyphen", "foo-.com", []string{}},
+		{"drops a label starting with a hyphen", "foo.-bar.com", []string{}},
 		{"keeps a bare tld for whole-tld matching", "edu", []string{"edu"}},
+		{"keeps hyphenated labels", "mail-server.co.uk", []string{"mail-server.co.uk"}},
 		{"keeps valid and drops invalid in one list", "@gmail.com, bad@x , outlook.com", []string{"gmail.com", "outlook.com"}},
 	}
 	for _, tc := range cases {
@@ -36,31 +39,50 @@ func TestParseEmailSuffixes(t *testing.T) {
 	}
 }
 
-// TestRejectInviteRewardChange guards the cross-config invariant "restriction
-// enabled implies at least one valid suffix": enabling with an empty list and
-// clearing the list while enabled are both rejected, and a non-domain-only list
-// (e.g. "@gmail.com") is normalized to a valid suffix so enabling is allowed.
-func TestRejectInviteRewardChange(t *testing.T) {
+// TestNormalizeEmailSuffixesStrict guards that a save collects every non-empty
+// invalid entry (so the caller can reject rather than silently drop it) and
+// returns the normalized, de-duplicated value to persist.
+func TestNormalizeEmailSuffixesStrict(t *testing.T) {
+	t.Run("normalizes, dedupes and reports no invalid for a clean list", func(t *testing.T) {
+		normalized, invalid := NormalizeEmailSuffixesStrict("@Gmail.com, gmail.com , outlook.com")
+		assert.Equal(t, "gmail.com,outlook.com", normalized)
+		assert.Empty(t, invalid)
+	})
+	t.Run("collects non-empty invalid entries verbatim", func(t *testing.T) {
+		normalized, invalid := NormalizeEmailSuffixesStrict("gmail.com, bad@x , foo-.com")
+		assert.Equal(t, "gmail.com", normalized)
+		assert.Equal(t, []string{"bad@x", "foo-.com"}, invalid)
+	})
+	t.Run("ignores blank entries without flagging them", func(t *testing.T) {
+		normalized, invalid := NormalizeEmailSuffixesStrict(" , gmail.com , ")
+		assert.Equal(t, "gmail.com", normalized)
+		assert.Empty(t, invalid)
+	})
+}
+
+// TestValidateInviteRewardConfig guards the atomic pair validation: it rejects
+// any non-empty invalid suffix, rejects enabling with no valid suffix, and
+// otherwise returns the normalized value to persist.
+func TestValidateInviteRewardConfig(t *testing.T) {
 	cases := []struct {
-		name         string
-		key          string
-		value        string
-		curEnabled   bool
-		curSuffixCnt int
-		wantRejected bool
+		name           string
+		enabled        bool
+		suffixes       string
+		wantNormalized string
+		wantRejected   bool
 	}{
-		{"reject enabling with empty suffix list", "InviteRewardEmailRestrictionEnabled", "true", false, 0, true},
-		{"allow enabling with suffixes present", "InviteRewardEmailRestrictionEnabled", "true", false, 1, false},
-		{"allow disabling regardless of suffixes", "InviteRewardEmailRestrictionEnabled", "false", true, 0, false},
-		{"reject clearing suffixes while enabled", "InviteRewardEmailSuffixes", "", true, 1, true},
-		{"reject clearing to only-invalid while enabled", "InviteRewardEmailSuffixes", " , bad@x ", true, 1, true},
-		{"allow clearing suffixes while disabled", "InviteRewardEmailSuffixes", "", false, 1, false},
-		{"allow setting valid suffixes while enabled", "InviteRewardEmailSuffixes", "gmail.com", true, 1, false},
-		{"allow @-prefixed suffix while enabled", "InviteRewardEmailSuffixes", "@gmail.com", true, 1, false},
+		{"reject enabling with empty suffixes", true, "", "", true},
+		{"reject enabling with only-blank suffixes", true, " , ", "", true},
+		{"reject any non-empty invalid entry", true, "gmail.com, bad@x", "gmail.com", true},
+		{"reject invalid even while disabled", false, "foo-.com", "", true},
+		{"allow enabling with a valid normalized suffix", true, "@Gmail.com", "gmail.com", false},
+		{"allow disabling with empty suffixes", false, "", "", false},
+		{"normalizes and dedupes on success", true, "gmail.com, GMAIL.com , outlook.com", "gmail.com,outlook.com", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := RejectInviteRewardChange(tc.key, tc.value, tc.curEnabled, tc.curSuffixCnt)
+			normalized, msg := ValidateInviteRewardConfig(tc.enabled, tc.suffixes)
+			assert.Equal(t, tc.wantNormalized, normalized)
 			assert.Equal(t, tc.wantRejected, msg != "")
 		})
 	}

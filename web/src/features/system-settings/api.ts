@@ -25,6 +25,7 @@ import type {
   SystemOptionsResponse,
   SystemTaskListResponse,
   SystemTaskResponse,
+  UpdateInviteRewardConfigRequest,
   UpdateOptionRequest,
   UpdateOptionResponse,
   UpstreamChannelsResponse,
@@ -38,6 +39,16 @@ export async function getSystemOptions() {
 
 export async function updateSystemOption(request: UpdateOptionRequest) {
   const res = await api.put<UpdateOptionResponse>('/api/option/', request)
+  return res.data
+}
+
+export async function updateInviteRewardConfig(
+  request: UpdateInviteRewardConfigRequest
+) {
+  const res = await api.put<UpdateOptionResponse>(
+    '/api/option/invite_reward',
+    request
+  )
   return res.data
 }
 

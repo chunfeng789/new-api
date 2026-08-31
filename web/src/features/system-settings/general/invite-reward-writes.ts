@@ -20,62 +20,56 @@ For commercial licensing, please contact support@quantumnous.com
 export const INVITE_REWARD_ENABLE_KEY = 'InviteRewardEmailRestrictionEnabled'
 export const INVITE_REWARD_SUFFIXES_KEY = 'InviteRewardEmailSuffixes'
 
-/**
- * Order the per-key option writes so the invite-reward suffix list and its
- * enable toggle never violate the backend invariant during a single save:
- * - when enabling, the suffix list must be persisted before the toggle
- *   (the backend refuses to enable while the stored list is empty);
- * - when disabling, the toggle must be dropped before the list is cleared
- *   (the backend refuses to clear the list while enabled).
- *
- * Other keys keep their original relative order (Array.prototype.sort is
- * stable). Returns the ordered [key, value] entries to write in sequence.
- */
-export function orderInviteRewardWrites(
-  changedFields: Record<string, unknown>
-): Array<[string, unknown]> {
-  const enabling = changedFields[INVITE_REWARD_ENABLE_KEY] === true
-  const rankOf = (key: string): number => {
-    if (key === INVITE_REWARD_SUFFIXES_KEY) return enabling ? 0 : 2
-    if (key === INVITE_REWARD_ENABLE_KEY) return 1
-    return 1
-  }
-  return Object.entries(changedFields).sort(
-    (a, b) => rankOf(a[0]) - rankOf(b[0])
-  )
+export type InviteRewardConfigWrite = { enabled: boolean; suffixes: string }
+
+/** Convert the newline-separated suffix textarea to the comma-separated
+ * storage format (trimmed, blanks dropped). Server-side validation rejects
+ * any remaining non-domain entries. */
+export function suffixesToStorage(value: string): string {
+  return value
+    .split('\n')
+    .map((suffix) => suffix.trim())
+    .filter(Boolean)
+    .join(',')
 }
 
-type OptionWriteResult = { success: boolean; message?: string }
-
 /**
- * Persist the changed quota-section fields one key at a time, ordered by
- * {@link orderInviteRewardWrites}, converting the newline-separated suffix
- * textarea back to the comma-separated storage format.
- *
- * The option API returns HTTP 200 with `{ success: false }` for a rejected
- * write (e.g. enabling with an empty list); this throws on the first such
- * result so the caller's form is not reset as if every change had persisted.
+ * Split the changed quota-section fields into the atomic invite-reward pair and
+ * the remaining per-key option writes. The invite-reward enable toggle and its
+ * suffix list are interdependent, so whenever either changed they are committed
+ * together in one request — carrying BOTH current values from `formValues` so
+ * the backend can validate and persist the complete pair atomically (which holds
+ * the invariant across a multi-instance deployment). Other keys are written
+ * individually as before.
  */
-export async function writeOrderedOptionChanges(
+export function splitQuotaSettingWrites(
   changedFields: Record<string, unknown>,
-  writeOption: (
-    key: string,
-    value: string | number | boolean
-  ) => Promise<OptionWriteResult>,
-  failureMessage: string
-): Promise<void> {
-  for (const [key, value] of orderInviteRewardWrites(changedFields)) {
-    let outValue = value as string | number | boolean
-    if (key === INVITE_REWARD_SUFFIXES_KEY && typeof value === 'string') {
-      outValue = value
-        .split('\n')
-        .map((suffix) => suffix.trim())
-        .filter(Boolean)
-        .join(',')
+  formValues: Record<string, unknown>
+): {
+  inviteReward: InviteRewardConfigWrite | null
+  otherWrites: Array<[string, unknown]>
+} {
+  let inviteRewardChanged = false
+  const otherWrites: Array<[string, unknown]> = []
+  for (const [key, value] of Object.entries(changedFields)) {
+    if (
+      key === INVITE_REWARD_ENABLE_KEY ||
+      key === INVITE_REWARD_SUFFIXES_KEY
+    ) {
+      inviteRewardChanged = true
+      continue
     }
-    const result = await writeOption(key, outValue)
-    if (result && result.success === false) {
-      throw new Error(result.message || failureMessage)
-    }
+    otherWrites.push([key, value])
   }
+
+  const inviteReward: InviteRewardConfigWrite | null = inviteRewardChanged
+    ? {
+        enabled: formValues[INVITE_REWARD_ENABLE_KEY] === true,
+        suffixes: suffixesToStorage(
+          String(formValues[INVITE_REWARD_SUFFIXES_KEY] ?? '')
+        ),
+      }
+    : null
+
+  return { inviteReward, otherWrites }
 }

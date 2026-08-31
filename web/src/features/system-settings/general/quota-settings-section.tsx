@@ -49,8 +49,11 @@ import {
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useSettingsForm } from '../hooks/use-settings-form'
-import { useUpdateOption } from '../hooks/use-update-option'
-import { writeOrderedOptionChanges } from './invite-reward-writes'
+import {
+  useUpdateInviteRewardConfig,
+  useUpdateOption,
+} from '../hooks/use-update-option'
+import { splitQuotaSettingWrites } from './invite-reward-writes'
 
 const quotaSchema = z.object({
   QuotaForNewUser: z.coerce.number().min(0),
@@ -86,6 +89,7 @@ export function QuotaSettingsSection({
 }: QuotaSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
+  const updateInviteReward = useUpdateInviteRewardConfig()
   const handleNumberChange =
     (onChange: (value: QuotaInputValue) => void) =>
     (event: ChangeEvent<HTMLInputElement>) => {
@@ -101,16 +105,30 @@ export function QuotaSettingsSection({
         QuotaFormValues
       >,
       defaultValues,
-      onSubmit: async (_data, changedFields) => {
-        // The invite-reward suffix list and its enable toggle are interdependent
-        // and the API can reject a write with { success: false }; the helper
-        // orders the writes and throws on rejection so the form is not reset as
-        // if every change had persisted (see writeOrderedOptionChanges).
-        await writeOrderedOptionChanges(
+      onSubmit: async (data, changedFields) => {
+        // The invite-reward enable toggle and suffix list are interdependent, so
+        // they are committed together via the atomic endpoint; other keys are
+        // written individually. A rejected write returns { success: false } — we
+        // throw so the form is not reset as if every change had persisted.
+        const { inviteReward, otherWrites } = splitQuotaSettingWrites(
           changedFields,
-          (key, value) => updateOption.mutateAsync({ key, value }),
-          t('Failed to update setting')
+          data
         )
+        for (const [key, value] of otherWrites) {
+          const result = await updateOption.mutateAsync({
+            key,
+            value: value as string | number | boolean,
+          })
+          if (result && result.success === false) {
+            throw new Error(result.message || t('Failed to update setting'))
+          }
+        }
+        if (inviteReward) {
+          const result = await updateInviteReward.mutateAsync(inviteReward)
+          if (result && result.success === false) {
+            throw new Error(result.message || t('Failed to update setting'))
+          }
+        }
       },
     })
 
@@ -132,7 +150,11 @@ export function QuotaSettingsSection({
         <SettingsForm onSubmit={handleSubmit}>
           <SettingsPageFormActions
             onSave={handleSubmit}
-            isSaving={updateOption.isPending || isSubmitting}
+            isSaving={
+              updateOption.isPending ||
+              updateInviteReward.isPending ||
+              isSubmitting
+            }
           />
           <FormDirtyIndicator isDirty={isDirty} />
           <SettingsFormGrid>
@@ -264,7 +286,7 @@ export function QuotaSettingsSection({
                       <Switch
                         checked={field.value}
                         onCheckedChange={field.onChange}
-                        disabled={updateOption.isPending}
+                        disabled={updateInviteReward.isPending}
                       />
                     </FormControl>
                   </SettingsSwitchItem>

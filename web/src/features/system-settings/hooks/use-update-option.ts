@@ -20,8 +20,11 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import i18next from 'i18next'
 import { toast } from 'sonner'
 
-import { updateSystemOption } from '../api'
-import type { UpdateOptionRequest } from '../types'
+import { updateInviteRewardConfig, updateSystemOption } from '../api'
+import type {
+  UpdateInviteRewardConfigRequest,
+  UpdateOptionRequest,
+} from '../types'
 
 // Configuration keys that require status refresh
 const STATUS_RELATED_KEYS = new Set([
@@ -37,8 +40,6 @@ const STATUS_RELATED_KEYS = new Set([
   'general_setting.custom_currency_symbol',
   'general_setting.custom_currency_exchange_rate',
   'oidc.display_name',
-  'InviteRewardEmailRestrictionEnabled',
-  'InviteRewardEmailSuffixes',
 ])
 
 export function useUpdateOption() {
@@ -61,6 +62,36 @@ export function useUpdateOption() {
           }
         }
 
+        toast.success(i18next.t('Setting updated successfully'))
+      } else {
+        toast.error(data.message || i18next.t('Failed to update setting'))
+      }
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || i18next.t('Failed to update setting'))
+    },
+  })
+}
+
+// Commits the invite-reward enable toggle and suffix list atomically. Both
+// fields are surfaced by /api/status (referral card + sign-up notice), so a
+// successful save also refreshes the status query and clears its localStorage
+// cache.
+export function useUpdateInviteRewardConfig() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (request: UpdateInviteRewardConfigRequest) =>
+      updateInviteRewardConfig(request),
+    onSuccess: (data) => {
+      if (data.success) {
+        queryClient.invalidateQueries({ queryKey: ['system-options'] })
+        queryClient.invalidateQueries({ queryKey: ['status'] })
+        try {
+          window.localStorage.removeItem('status')
+        } catch {
+          /* empty */
+        }
         toast.success(i18next.t('Setting updated successfully'))
       } else {
         toast.error(data.message || i18next.t('Failed to update setting'))

@@ -39,6 +39,11 @@ export type UpdateOptionResponse = {
   message: string
 }
 
+export type UpdateInviteRewardConfigRequest = {
+  enabled: boolean
+  suffixes: string
+}
+
 export type ConfirmPaymentComplianceResponse = {
   success: boolean
   message: string

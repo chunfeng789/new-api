@@ -16,120 +16,75 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, test } from 'vitest'
 
 import {
-  orderInviteRewardWrites,
-  writeOrderedOptionChanges,
+  splitQuotaSettingWrites,
+  suffixesToStorage,
 } from '../invite-reward-writes'
 
-const keysOf = (changed: Record<string, unknown>) =>
-  orderInviteRewardWrites(changed).map(([key]) => key)
-
-describe('orderInviteRewardWrites', () => {
-  test('persists the suffix list before the enable toggle when enabling', () => {
-    const order = keysOf({
-      InviteRewardEmailRestrictionEnabled: true,
-      InviteRewardEmailSuffixes: 'gmail.com',
-    })
-
-    expect(order.indexOf('InviteRewardEmailSuffixes')).toBeLessThan(
-      order.indexOf('InviteRewardEmailRestrictionEnabled')
-    )
-  })
-
-  test('drops the enable toggle before clearing the suffix list when disabling', () => {
-    const order = keysOf({
-      InviteRewardEmailRestrictionEnabled: false,
-      InviteRewardEmailSuffixes: '',
-    })
-
-    expect(order.indexOf('InviteRewardEmailRestrictionEnabled')).toBeLessThan(
-      order.indexOf('InviteRewardEmailSuffixes')
-    )
-  })
-
-  test('returns a single entry when only the suffix list changed', () => {
-    const order = keysOf({ InviteRewardEmailSuffixes: 'gmail.com' })
-
-    expect(order).toEqual(['InviteRewardEmailSuffixes'])
-  })
-
-  test('keeps unrelated keys in their original relative order', () => {
-    const order = keysOf({
-      QuotaForInviter: 1,
-      InviteRewardEmailRestrictionEnabled: true,
-      QuotaForInvitee: 2,
-      InviteRewardEmailSuffixes: 'gmail.com',
-    })
-
-    // suffixes first (enabling), then the unrelated keys in original order,
-    // with the enable toggle no earlier than the suffixes.
-    expect(order[0]).toBe('InviteRewardEmailSuffixes')
-    expect(order.indexOf('QuotaForInviter')).toBeLessThan(
-      order.indexOf('QuotaForInvitee')
-    )
-    expect(order.indexOf('InviteRewardEmailSuffixes')).toBeLessThan(
-      order.indexOf('InviteRewardEmailRestrictionEnabled')
+describe('suffixesToStorage', () => {
+  test('converts newlines to a trimmed, blank-free comma list', () => {
+    expect(suffixesToStorage('gmail.com\n outlook.com \n\n')).toBe(
+      'gmail.com,outlook.com'
     )
   })
 })
 
-describe('writeOrderedOptionChanges', () => {
-  test('writes the suffix list (as comma-joined) before enabling the toggle', async () => {
-    const calls: Array<[string, string | number | boolean]> = []
-    const writeOption = vi.fn(
-      async (key: string, value: string | number | boolean) => {
-        calls.push([key, value])
-        return { success: true }
+describe('splitQuotaSettingWrites', () => {
+  test('bundles both invite-reward values when only the toggle changed', () => {
+    const { inviteReward, otherWrites } = splitQuotaSettingWrites(
+      { InviteRewardEmailRestrictionEnabled: true },
+      {
+        InviteRewardEmailRestrictionEnabled: true,
+        InviteRewardEmailSuffixes: 'gmail.com\noutlook.com',
       }
     )
 
-    await writeOrderedOptionChanges(
+    expect(inviteReward).toEqual({
+      enabled: true,
+      suffixes: 'gmail.com,outlook.com',
+    })
+    expect(otherWrites).toEqual([])
+  })
+
+  test('bundles both invite-reward values when only the suffix list changed', () => {
+    const { inviteReward, otherWrites } = splitQuotaSettingWrites(
+      { InviteRewardEmailSuffixes: 'gmail.com' },
       {
-        InviteRewardEmailRestrictionEnabled: true,
-        InviteRewardEmailSuffixes: 'gmail.com\n outlook.com \n',
-      },
-      writeOption,
-      'failed'
+        InviteRewardEmailRestrictionEnabled: false,
+        InviteRewardEmailSuffixes: 'gmail.com',
+      }
     )
 
-    expect(calls).toEqual([
-      ['InviteRewardEmailSuffixes', 'gmail.com,outlook.com'],
-      ['InviteRewardEmailRestrictionEnabled', true],
+    expect(inviteReward).toEqual({ enabled: false, suffixes: 'gmail.com' })
+    expect(otherWrites).toEqual([])
+  })
+
+  test('separates unrelated keys into per-key writes and omits the pair', () => {
+    const { inviteReward, otherWrites } = splitQuotaSettingWrites(
+      { QuotaForInviter: 5, TopUpLink: 'https://x' },
+      {}
+    )
+
+    expect(inviteReward).toBeNull()
+    expect(otherWrites).toEqual([
+      ['QuotaForInviter', 5],
+      ['TopUpLink', 'https://x'],
     ])
   })
 
-  test('throws on the first { success: false } and stops writing further keys', async () => {
-    const calls: string[] = []
-    const writeOption = vi.fn(async (key: string) => {
-      calls.push(key)
-      return key === 'InviteRewardEmailSuffixes'
-        ? { success: false, message: 'rejected' }
-        : { success: true }
-    })
+  test('returns both the pair and the remaining per-key writes together', () => {
+    const { inviteReward, otherWrites } = splitQuotaSettingWrites(
+      { QuotaForInviter: 5, InviteRewardEmailRestrictionEnabled: true },
+      {
+        QuotaForInviter: 5,
+        InviteRewardEmailRestrictionEnabled: true,
+        InviteRewardEmailSuffixes: 'gmail.com',
+      }
+    )
 
-    await expect(
-      writeOrderedOptionChanges(
-        {
-          InviteRewardEmailRestrictionEnabled: true,
-          InviteRewardEmailSuffixes: '',
-        },
-        writeOption,
-        'failed'
-      )
-    ).rejects.toThrow('rejected')
-
-    // suffix write ran first and failed, so the enable toggle is never written.
-    expect(calls).toEqual(['InviteRewardEmailSuffixes'])
-  })
-
-  test('resolves without throwing when every write succeeds', async () => {
-    const writeOption = vi.fn(async () => ({ success: true }))
-
-    await expect(
-      writeOrderedOptionChanges({ QuotaForInviter: 5 }, writeOption, 'failed')
-    ).resolves.toBeUndefined()
-    expect(writeOption).toHaveBeenCalledWith('QuotaForInviter', 5)
+    expect(inviteReward).toEqual({ enabled: true, suffixes: 'gmail.com' })
+    expect(otherWrites).toEqual([['QuotaForInviter', 5]])
   })
 })
