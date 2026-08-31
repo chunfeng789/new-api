@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -18,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/Calcium-Ion/go-epay/epay"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
@@ -737,9 +739,9 @@ func AdminRefundTopUp(c *gin.Context) {
 	}
 }
 
-// ReconcileNativeRefunds 扫描需继续对账的原生扫码退款订单（refund_pending 与 refund_failed），
-// 以幂等退款单号重新提交/确认并推进结算。脱离用户请求运行，保证渠道最终退款成功后本地额度
-// 一定被回滚（重启/断连/首次申请从未真正发出都不丢单），异常退款经人工处理后也能自动补扣。
+// ReconcileNativeRefunds 扫描退款处理中（refund_pending）的原生扫码订单，以幂等退款单号
+// 重新提交/确认并推进结算。脱离用户请求运行，保证渠道最终退款成功后本地额度一定被回滚
+// （重启/断连/首次申请从未真正发出都不丢单）。异常退款（refund_failed）为人工终态，不在此自动处理。
 // 用 id 游标翻页遍历全量，避免最早 N 条长时间处理中时饿死后续退款。
 func ReconcileNativeRefunds() {
 	afterId := 0
@@ -767,7 +769,7 @@ func reconcileOneNativeRefund(tradeNo, provider string, refundYuan float64) {
 
 	// 加锁后重读，避免与退款接口/其它对账并发
 	cur := model.GetTopUpByTradeNo(tradeNo)
-	if cur == nil || (cur.Status != common.TopUpStatusRefundPending && cur.Status != common.TopUpStatusRefundFailed) {
+	if cur == nil || cur.Status != common.TopUpStatusRefundPending {
 		return
 	}
 
@@ -786,16 +788,48 @@ func reconcileOneNativeRefund(tradeNo, provider string, refundYuan float64) {
 	}
 }
 
+var (
+	nativeReconcileOnce          sync.Once
+	nativeTopupReconcileRunning  atomic.Bool
+	nativeRefundReconcileRunning atomic.Bool
+)
+
 // StartNativeOrderReconciler 周期性对账微信/支付宝原生扫码订单，直到进程退出：
 //   - 待支付充值订单：主动查渠道，已支付则结算到账、超时未支付则置为过期
-//   - 退款处理中订单：主动查渠道，确认成功则回滚额度、终态失败则回退/标记异常
+//   - 退款处理中订单：以幂等退款单号重新提交/确认，成功则回滚额度
 //
-// 保证服务重启/断连/漏回调时订单仍被自动补偿。由 main 以 goroutine 启动。
+// 保证服务重启/断连/漏回调时订单仍被自动补偿。充值与退款各自独立 goroutine + 独立节流，
+// 退款对账不再排在充值全量扫描之后被阻塞。仅主节点运行（与订阅重置、鉴权清理等维护任务一致），
+// 避免多节点重复查询渠道；正确性另由订单行锁与幂等结算保证。非阻塞，由 main 直接调用。
 func StartNativeOrderReconciler() {
+	nativeReconcileOnce.Do(func() {
+		if !common.IsMasterNode {
+			return
+		}
+		gopool.Go(func() {
+			runNativeReconcileLoop("充值", &nativeTopupReconcileRunning, ReconcilePendingNativeTopups)
+		})
+		gopool.Go(func() {
+			runNativeReconcileLoop("退款", &nativeRefundReconcileRunning, ReconcileNativeRefunds)
+		})
+	})
+}
+
+// runNativeReconcileLoop 以固定间隔运行一个自节流的对账循环：上一轮未结束则跳过本轮，
+// 避免订单量大、渠道超时导致的多轮叠加。供充值/退款两个对账任务复用。
+func runNativeReconcileLoop(name string, running *atomic.Bool, run func()) {
 	ticker := time.NewTicker(nativeReconcileInterval)
 	defer ticker.Stop()
+	guarded := func() {
+		if !running.CompareAndSwap(false, true) {
+			logger.LogWarn(context.Background(), "原生扫码 "+name+"对账上一轮仍在进行，跳过本轮")
+			return
+		}
+		defer running.Store(false)
+		run()
+	}
+	guarded()
 	for range ticker.C {
-		ReconcilePendingNativeTopups()
-		ReconcileNativeRefunds()
+		guarded()
 	}
 }

@@ -256,34 +256,34 @@ func TestMarkRefundFailedFromPending(t *testing.T) {
 	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
 }
 
-// 异常退款（refund_failed）经商户平台处理后渠道最终转 SUCCESS，对账须能据此从
-// refund_failed 状态补扣快照并置 refunded，避免"资金已退、额度仍可消费"的不一致。
-func TestRefundNativeQRSettlesFromRefundFailed(t *testing.T) {
+// 异常退款（refund_failed）为人工终态：微信异常退款可退至用户或退至商户账户，
+// 仅凭渠道状态无法确认款项确实退给了用户，故 RefundNativeQR 拒绝从 refund_failed 自动扣额，
+// 避免误伤未收到退款的用户（应由管理员在商户平台核实处理）。
+func TestRefundNativeQRRejectsRefundFailedOrder(t *testing.T) {
 	truncateTables(t)
 
 	user := insertUserForPaymentGuardTest(t, 637, 1_000_000)
-	order := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDFAILSETTLE", PaymentProviderWechatNative, 1_000_000, 1000)
+	order := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDFAILREJECT", PaymentProviderWechatNative, 1_000_000, 1000)
 	require.NoError(t, MarkRefundPendingNativeQR(order.TradeNo, PaymentProviderWechatNative))
 	require.NoError(t, MarkRefundFailedNativeQR(order.TradeNo, PaymentProviderWechatNative))
 	require.Equal(t, common.TopUpStatusRefundFailed, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
 
-	alreadyDone, err := RefundNativeQR(order.TradeNo, PaymentProviderWechatNative, "reconcile")
-	require.NoError(t, err)
-	assert.False(t, alreadyDone)
-	assert.Equal(t, 0, getUserQuotaForPaymentGuardTest(t, user.Id))
-	assert.Equal(t, common.TopUpStatusRefunded, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+	_, err := RefundNativeQR(order.TradeNo, PaymentProviderWechatNative, "reconcile")
+	require.ErrorIs(t, err, ErrTopUpNotRefundable)
+	assert.Equal(t, 1_000_000, getUserQuotaForPaymentGuardTest(t, user.Id))
+	assert.Equal(t, common.TopUpStatusRefundFailed, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
 }
 
-// GetReconcilableNativeRefunds 返回需继续对账的原生退款订单：refund_pending 与 refund_failed
-// 都要包含（后者用于异常退款处理后补扣），排除 success 与非原生渠道。
-func TestGetReconcilableNativeRefundsReturnsPendingAndFailedNativeOrders(t *testing.T) {
+// GetReconcilableNativeRefunds 只返回退款处理中（refund_pending）的原生订单，
+// 排除 refund_failed（人工终态）、success 与非原生渠道。
+func TestGetReconcilableNativeRefundsOnlyReturnsPendingNativeOrders(t *testing.T) {
 	truncateTables(t)
 
 	user := insertUserForPaymentGuardTest(t, 635, 5_000_000)
 	// 一笔退款处理中的微信原生订单：应被返回
 	pendingOrder := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDPENDLIST", PaymentProviderWechatNative, 1_000_000, 1000)
 	require.NoError(t, MarkRefundPendingNativeQR(pendingOrder.TradeNo, PaymentProviderWechatNative))
-	// 一笔退款异常终态的支付宝原生订单：也应被返回
+	// 一笔退款异常终态的支付宝原生订单：不应被返回（人工处理）
 	failedOrder := createNativeSuccessOrderWithSnapshot(t, user.Id, "NATIVEREFUNDFAILLIST", PaymentProviderAlipayNative, 1_000_000, 1000)
 	require.NoError(t, MarkRefundPendingNativeQR(failedOrder.TradeNo, PaymentProviderAlipayNative))
 	require.NoError(t, MarkRefundFailedNativeQR(failedOrder.TradeNo, PaymentProviderAlipayNative))
@@ -298,7 +298,7 @@ func TestGetReconcilableNativeRefundsReturnsPendingAndFailedNativeOrders(t *test
 	for _, o := range got {
 		tradeNos = append(tradeNos, o.TradeNo)
 	}
-	assert.ElementsMatch(t, []string{"NATIVEREFUNDPENDLIST", "NATIVEREFUNDFAILLIST"}, tradeNos)
+	assert.ElementsMatch(t, []string{"NATIVEREFUNDPENDLIST"}, tradeNos)
 }
 
 // 游标分页：afterId 之后的订单才返回，保证对账可翻页遍历全量而不饿死后续退款。

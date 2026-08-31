@@ -123,8 +123,10 @@ func getWechatClient() (*wechat.ClientV3, error) {
 }
 
 // NativePrecreate 统一下单，返回可生成二维码的支付串。
-// moneyYuan 为实际支付金额（人民币元）。
-func NativePrecreate(ctx context.Context, provider, tradeNo, subject string, moneyYuan float64, notifyURL string) (string, error) {
+// moneyYuan 为实际支付金额（人民币元）。expiresAt 为订单截止时间（秒级 Unix），
+// 由调用方基于订单 CreateTime 唯一计算并持久化，同时写入渠道 time_expire——
+// 保证渠道与本地对账使用同一时刻判定过期，杜绝“本地已过期、渠道仍可付款”窗口。
+func NativePrecreate(ctx context.Context, provider, tradeNo, subject string, moneyYuan float64, notifyURL string, expiresAt int64) (string, error) {
 	switch provider {
 	case model.PaymentProviderWechatNative:
 		client, err := getWechatClient()
@@ -141,8 +143,9 @@ func NativePrecreate(ctx context.Context, provider, tradeNo, subject string, mon
 			Set("description", subject).
 			Set("out_trade_no", tradeNo).
 			Set("notify_url", notifyURL).
-			// 渠道侧订单截止时间：与本地对账过期判定一致，过期后微信拒绝支付
-			Set("time_expire", time.Now().Add(time.Duration(NativeOrderValiditySeconds)*time.Second).Format(time.RFC3339)).
+			// 渠道侧订单截止时间＝本地持久化的 expires_at（RFC3339 含时区偏移，跨时区安全），
+			// 与本地对账过期判定为同一时刻，过期后微信拒绝支付
+			Set("time_expire", time.Unix(expiresAt, 0).Format(time.RFC3339)).
 			SetBodyMap("amount", func(b gopay.BodyMap) {
 				b.Set("total", totalFen).Set("currency", "CNY")
 			})
@@ -164,7 +167,9 @@ func NativePrecreate(ctx context.Context, provider, tradeNo, subject string, mon
 			Set("total_amount", decimal.NewFromFloat(moneyYuan).Round(2).String()).
 			Set("subject", subject).
 			Set("notify_url", notifyURL).
-			// 渠道侧订单相对超时：与本地对账过期判定一致，过期后支付宝关单拒付
+			// 支付宝用相对超时（分钟）而非绝对 time_expire：绝对时间按支付宝服务器（北京）时区解析，
+			// 若本服务运行在 UTC 会偏移 8 小时；相对超时跨时区安全。支付宝客户端构造无网络开销，
+			// 从下单到落库的时差可忽略，与本地 expires_at 实质对齐，过期后支付宝拒付。
 			Set("timeout_express", fmt.Sprintf("%dm", NativeOrderValiditySeconds/60))
 		rsp, err := client.TradePrecreate(ctx, bm)
 		if err != nil {
@@ -194,7 +199,13 @@ func NativeQuery(ctx context.Context, provider, tradeNo string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		// 非 200（429/5xx/鉴权失败等）为不确定，必须报错而非当成“未支付”，
+		// 404：订单在渠道侧不存在（下单从未成功/进程在下单前退出）。已创建订单即使未支付也返回
+		// 200 NOTPAY，故 404 是确定性“未支付且永不会支付”，视为未支付以便对账收敛过期，
+		// 避免这类孤儿订单永久 pending、每轮反复查询。
+		if rsp.Code == http.StatusNotFound {
+			return false, nil
+		}
+		// 其它非 200（429/5xx/鉴权失败等）为不确定，必须报错而非当成“未支付”，
 		// 否则对账会在瞬时故障下把已支付订单误判过期，造成已付款不到账。
 		if rsp.Code != wechat.Success || rsp.Response == nil {
 			return false, fmt.Errorf("微信订单查询未成功: %s", rsp.Error)

@@ -91,6 +91,10 @@ func RequestNativePay(c *gin.Context) {
 	}
 
 	tradeNo := fmt.Sprintf("USR%dNO%s%d", id, common.GetRandomString(6), time.Now().Unix())
+	// 唯一计算截止时间：同时用于持久化 expires_at 与渠道 time_expire，
+	// 保证渠道与本地对账用同一时刻判定过期。
+	createTime := time.Now().Unix()
+	expiresAt := createTime + service.NativeOrderValiditySeconds
 
 	// 先落库 pending 订单，确保快速到达的回调/轮询能命中订单
 	topUp := &model.TopUp{
@@ -100,7 +104,8 @@ func RequestNativePay(c *gin.Context) {
 		TradeNo:         tradeNo,
 		PaymentMethod:   req.PaymentMethod,
 		PaymentProvider: provider,
-		CreateTime:      time.Now().Unix(),
+		CreateTime:      createTime,
+		ExpiresAt:       expiresAt,
 		Status:          common.TopUpStatusPending,
 	}
 	if err := topUp.Insert(); err != nil {
@@ -116,8 +121,13 @@ func RequestNativePay(c *gin.Context) {
 	notifyURL := service.GetCallbackAddress() + notifyPath
 	subject := fmt.Sprintf("%s-%d", common.SystemName, req.Amount)
 
-	codeURL, err := service.NativePrecreate(c.Request.Context(), provider, tradeNo, subject, payMoney, notifyURL)
+	codeURL, err := service.NativePrecreate(c.Request.Context(), provider, tradeNo, subject, payMoney, notifyURL, expiresAt)
 	if err != nil {
+		// 渠道下单失败：订单在渠道侧未创建，用户也未拿到二维码（无法支付），立即置为 failed，
+		// 避免这条 pending 订单永久滞留、被后台对账每轮反复查询。
+		if uerr := model.UpdatePendingTopUpStatus(tradeNo, provider, common.TopUpStatusFailed); uerr != nil {
+			logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 下单失败后置 failed 失败 trade_no=%s provider=%s error=%q", tradeNo, provider, uerr.Error()))
+		}
 		logger.LogError(c.Request.Context(), fmt.Sprintf("原生扫码 拉起支付失败 user_id=%d trade_no=%s provider=%s amount=%d error=%q", id, tradeNo, provider, req.Amount, err.Error()))
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "拉起支付失败"})
 		return
@@ -226,9 +236,14 @@ func AlipayNativeNotify(c *gin.Context) {
 }
 
 // 充值订单对账参数：仅对账创建满 MinAge 的待支付订单（避开用户仍在支付的新订单）。
-// 过期判定复用渠道下单时写入的有效期 service.NativeOrderValiditySeconds，保证本地判过期时
+// 过期判定用订单持久化的 expires_at（下单时同一值写入渠道 time_expire），保证本地判过期时
 // 渠道也已拒绝支付，不会出现“本地已过期、渠道仍可付款”导致的已付款不到账。
-const nativeTopupReconcileMinAge int64 = 2 * 60
+// 历史订单（expires_at==0，升级前创建、渠道未设截止时间，微信默认 7 天可支付）用保守回退窗口，
+// 避免用 2 小时过早误判过期。
+const (
+	nativeTopupReconcileMinAge          int64 = 2 * 60
+	nativeTopupHistoricalExpireFallback int64 = 7 * 24 * 60 * 60
+)
 
 // ReconcilePendingNativeTopups 扫描待支付的原生扫码充值订单，主动向渠道查询：
 // 已支付则幂等结算到账（覆盖漏回调/用户关页/服务重启期间完成的支付）；
@@ -243,7 +258,7 @@ func ReconcilePendingNativeTopups() {
 			return
 		}
 		for _, order := range orders {
-			reconcileOnePendingNativeTopup(order.TradeNo, order.PaymentProvider, order.CreateTime)
+			reconcileOnePendingNativeTopup(order.TradeNo, order.PaymentProvider)
 			if order.Id > afterId {
 				afterId = order.Id
 			}
@@ -254,7 +269,7 @@ func ReconcilePendingNativeTopups() {
 	}
 }
 
-func reconcileOnePendingNativeTopup(tradeNo, provider string, createTime int64) {
+func reconcileOnePendingNativeTopup(tradeNo, provider string) {
 	LockOrder(tradeNo)
 	defer UnlockOrder(tradeNo)
 
@@ -277,9 +292,15 @@ func reconcileOnePendingNativeTopup(tradeNo, provider string, createTime int64) 
 		}
 		return
 	}
-	// 未支付且已过渠道有效期：置为过期，收敛待对账集合（已支付订单不会走到这里；
+	// 截止时间：新订单用持久化的 expires_at（与渠道 time_expire 同一时刻）；
+	// 历史订单（expires_at==0）用保守回退窗口，避免过早误判过期。
+	expiry := cur.ExpiresAt
+	if expiry <= 0 {
+		expiry = cur.CreateTime + nativeTopupHistoricalExpireFallback
+	}
+	// 未支付且已过截止时间：置为过期，收敛待对账集合（已支付订单不会走到这里；
 	// 查询非确定性失败已在上面 return，不会误判过期）
-	if common.GetTimestamp()-createTime >= service.NativeOrderValiditySeconds {
+	if common.GetTimestamp() >= expiry {
 		if err := model.UpdatePendingTopUpStatus(tradeNo, provider, common.TopUpStatusExpired); err != nil {
 			logger.LogWarn(ctx, fmt.Sprintf("原生扫码 充值对账置过期失败 trade_no=%s provider=%s error=%q", tradeNo, provider, err.Error()))
 		}
