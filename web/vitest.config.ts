@@ -31,7 +31,12 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    server: {
+      deps: { inline: [/@lobehub\//, /antd-style/] },
+    },
     setupFiles: ['./src/test-setup.ts'],
+    // Room for the 5s asyncUtilTimeout configured in the setup file.
+    testTimeout: 20000,
     clearMocks: true,
     restoreMocks: true,
     include: ['src/**/*.{test,spec}.{ts,tsx}'],

@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import '@testing-library/jest-dom/vitest'
-import { cleanup } from '@testing-library/react'
+import { cleanup, configure } from '@testing-library/react'
 import i18next from 'i18next'
 import { initReactI18next } from 'react-i18next'
 import { afterEach, beforeAll } from 'vitest'
@@ -38,10 +38,18 @@ afterEach(() => {
   cleanup()
 })
 
+// CI runners are several times slower than a developer machine, where the
+// 1s default leaves findBy* queries no room once a render is queued behind
+// other work.
+configure({ asyncUtilTimeout: 5000 })
+
 Object.defineProperty(window, 'matchMedia', {
   configurable: true,
+  // Report reduced motion so `motion/react` components render their final
+  // state instead of animating in from `opacity: 0`. Without it, assertions
+  // such as `toBeVisible()` race the animation frames.
   value: (query: string): MediaQueryList => ({
-    matches: false,
+    matches: query.includes('prefers-reduced-motion'),
     media: query,
     onchange: null,
     addListener: () => undefined,
