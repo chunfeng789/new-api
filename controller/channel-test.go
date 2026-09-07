@@ -133,8 +133,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			requestPath = "/v1/embeddings" // 修改请求路径
 		}
 
-		// VolcEngine 图像生成模型
-		if channel.Type == constant.ChannelTypeVolcEngine && strings.Contains(testModel, "seedream") {
+		if isImageGenerationTestModel(testModel, channel.Type) {
 			requestPath = "/v1/images/generations"
 		}
 
@@ -698,6 +697,17 @@ func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 	return message
 }
 
+// isImageGenerationTestModel 判断渠道测试是否应当通过 /v1/images/generations 而非
+// 对话端点探测该模型。请求路径与请求体都依赖它，两者必须保持一致。
+func isImageGenerationTestModel(modelName string, channelType int) bool {
+	if common.IsImageGenerationModel(modelName) {
+		return true
+	}
+	// 火山引擎 Seedream 未纳入全局图像模型分类，仅在渠道测试内识别
+	return channelType == constant.ChannelTypeVolcEngine &&
+		strings.Contains(strings.ToLower(modelName), "seedream")
+}
+
 func buildTestRequest(model string, endpointType string, channel *model.Channel, isStream bool) dto.Request {
 	testResponsesInput := json.RawMessage(`[{"role":"user","content":"hi"}]`)
 
@@ -800,6 +810,15 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		return &dto.EmbeddingRequest{
 			Model: model,
 			Input: []any{"hello world"},
+		}
+	}
+
+	if isImageGenerationTestModel(model, channel.Type) {
+		return &dto.ImageRequest{
+			Model:  model,
+			Prompt: "a cute cat",
+			N:      lo.ToPtr(uint(1)),
+			Size:   "1024x1024",
 		}
 	}
 
