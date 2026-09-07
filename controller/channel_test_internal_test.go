@@ -466,3 +466,54 @@ func TestTestAllChannelsRejectsExistingActiveTask(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
 	require.Contains(t, recorder.Body.String(), "已有通道测试任务正在运行或等待中")
 }
+
+func TestImageGenerationModelsAreNotTreatedAsChatModels(t *testing.T) {
+	// gpt-image-2 之前只能匹配硬编码的 "gpt-image-1"，因而被当作对话模型：
+	// 渠道测试打到 /v1/chat/completions，模型广场也只展示 chat 端点。
+	tests := []struct {
+		name        string
+		model       string
+		channelType int
+		wantImage   bool
+	}{
+		{name: "gpt-image-2", model: "gpt-image-2", channelType: constant.ChannelTypeOpenAI, wantImage: true},
+		{name: "gpt-image-1", model: "gpt-image-1", channelType: constant.ChannelTypeOpenAI, wantImage: true},
+		{name: "gpt-image-1-mini", model: "gpt-image-1-mini", channelType: constant.ChannelTypeOpenAI, wantImage: true},
+		{name: "gpt-image-1.5", model: "gpt-image-1.5", channelType: constant.ChannelTypeOpenAI, wantImage: true},
+		{name: "chatgpt-image-latest", model: "chatgpt-image-latest", channelType: constant.ChannelTypeOpenAI, wantImage: true},
+		{name: "namespaced", model: "openai/gpt-image-2", channelType: constant.ChannelTypeOpenAI, wantImage: true},
+		{name: "dall-e-3", model: "dall-e-3", channelType: constant.ChannelTypeOpenAI, wantImage: true},
+		{name: "seedream mixed case", model: "Seedream-4.0", channelType: constant.ChannelTypeVolcEngine, wantImage: true},
+		{name: "seedream other channel", model: "seedream-4.0", channelType: constant.ChannelTypeOpenAI, wantImage: false},
+		{name: "chat model", model: "gpt-4o-mini", channelType: constant.ChannelTypeOpenAI, wantImage: false},
+		{name: "image understanding chat model", model: "gpt-4o", channelType: constant.ChannelTypeOpenAI, wantImage: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantImage, isImageGenerationTestModel(tt.model, tt.channelType))
+
+			// 请求体必须与自动检测选出的请求路径一致，否则 relay 会因类型断言失败而报
+			// "invalid image request type"。
+			request := buildTestRequest(tt.model, "", &model.Channel{Type: tt.channelType}, false)
+			if tt.wantImage {
+				imageReq, ok := request.(*dto.ImageRequest)
+				require.True(t, ok, "expected *dto.ImageRequest, got %T", request)
+				assert.Equal(t, tt.model, imageReq.Model)
+			} else {
+				assert.IsType(t, &dto.GeneralOpenAIRequest{}, request)
+			}
+		})
+	}
+}
+
+func TestImageGenerationModelsExposeImageEndpointType(t *testing.T) {
+	// 模型广场的「调用示例」按 supported_endpoint_types 的首个端点渲染，
+	// image-generation 必须排在 openai 之前。
+	endpoints := common.GetEndpointTypesByChannelType(constant.ChannelTypeOpenAI, "gpt-image-2")
+	require.NotEmpty(t, endpoints)
+	assert.Equal(t, constant.EndpointTypeImageGeneration, endpoints[0])
+
+	chatEndpoints := common.GetEndpointTypesByChannelType(constant.ChannelTypeOpenAI, "gpt-4o-mini")
+	assert.NotContains(t, chatEndpoints, constant.EndpointTypeImageGeneration)
+}

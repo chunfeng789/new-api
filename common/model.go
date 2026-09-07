@@ -12,7 +12,9 @@ var (
 	ImageGenerationModels = []string{
 		"dall-e-3",
 		"dall-e-2",
-		"gpt-image-1",
+		// 覆盖整个 gpt-image 系列（gpt-image-1/1-mini/1.5/2/…、chatgpt-image-latest），
+		// 以及 openai/gpt-image-2 这类带命名空间前缀的模型名
+		"gpt-image-",
 		"prefix:imagen-",
 		"flux-",
 		"flux.1-",
