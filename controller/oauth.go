@@ -346,7 +346,22 @@ func handleOAuthLogin(c *gin.Context, provider oauth.Provider, oauthUser *oauth.
 		return
 	}
 
-	// 9. Setup login
+	// 9. Fill in an address for accounts created before the provider exposed
+	// one. This is best effort: a conflicting or unstorable address leaves the
+	// account as it is and must never block the login.
+	if user.Email == "" && oauthUser.Email != "" {
+		stored, err := model.BackfillMissingEmail(user.Id, oauthUser.Email)
+		switch {
+		case errors.Is(err, model.ErrEmailAlreadyTaken):
+			common.SysLog(fmt.Sprintf("[OAuth] %s email for user %d already belongs to another account, left unset", provider.GetName(), user.Id))
+		case err != nil:
+			common.SysError(fmt.Sprintf("[OAuth] failed to backfill email for user %d: %s", user.Id, err.Error()))
+		case stored:
+			user.Email = model.NormalizeEmail(oauthUser.Email)
+		}
+	}
+
+	// 10. Setup login
 	setupLogin(user, c)
 }
 

@@ -663,6 +663,40 @@ func BindEmailToUser(user *User, email string) error {
 	return updateUserCache(*user)
 }
 
+// BackfillMissingEmail stores email on a user that currently has none, for
+// accounts created before their identity provider exposed an address. It never
+// replaces an address the account already has: the conditional update lets a
+// concurrent binding win instead of being silently overwritten, and the caller
+// learns from the returned flag whether the address was actually stored.
+func BackfillMissingEmail(userID int, email string) (bool, error) {
+	email = NormalizeEmail(email)
+	if userID <= 0 || email == "" {
+		return false, nil
+	}
+	stored := false
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		return withNormalizedEmailLock(tx, email, func(tx *gorm.DB) error {
+			if err := ensureEmailAvailableWithTx(tx, email, userID); err != nil {
+				return err
+			}
+			result := tx.Model(&User{}).
+				Where("id = ? AND (email IS NULL OR email = ?)", userID, "").
+				Update("email", email)
+			if result.Error != nil {
+				return result.Error
+			}
+			stored = result.RowsAffected > 0
+			return nil
+		})
+	}); err != nil {
+		return false, err
+	}
+	if !stored {
+		return false, nil
+	}
+	return true, updateUserEmailCache(userID, email)
+}
+
 func ensureEmailAvailableWithTx(tx *gorm.DB, email string, excludeUserID int) error {
 	email = NormalizeEmail(email)
 	if email == "" {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -35,6 +36,13 @@ type gitHubUser struct {
 	Login string `json:"login"` // GitHub username (can be changed by user)
 	Name  string `json:"name"`
 	Email string `json:"email"`
+}
+
+// gitHubUserEmail is one entry of the authenticated user's email list.
+type gitHubUserEmail struct {
+	Email    string `json:"email"`
+	Primary  bool   `json:"primary"`
+	Verified bool   `json:"verified"`
 }
 
 func (p *GitHubProvider) GetName() string {
@@ -144,18 +152,93 @@ func (p *GitHubProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*O
 		return nil, NewOAuthError(i18n.MsgOAuthUserInfoEmpty, map[string]any{"Provider": "GitHub"})
 	}
 
+	// /user only carries the optional public profile address, so it is empty for
+	// every account that keeps its email private. The account's real address is
+	// exposed by /user/emails, which the granted user:email scope unlocks.
+	email := strings.TrimSpace(githubUser.Email)
+	if email == "" || isGitHubNoReplyEmail(email) {
+		email = p.fetchVerifiedEmail(ctx, token)
+	}
+
 	logger.LogDebug(ctx, "[OAuth-GitHub] GetUserInfo success: id=%d, login=%s, name=%s, email=%s",
-		githubUser.Id, githubUser.Login, githubUser.Name, githubUser.Email)
+		githubUser.Id, githubUser.Login, githubUser.Name, email)
 
 	return &OAuthUser{
 		ProviderUserID: strconv.FormatInt(githubUser.Id, 10), // Use numeric ID as primary identifier
 		Username:       githubUser.Login,
 		DisplayName:    githubUser.Name,
-		Email:          githubUser.Email,
+		Email:          email,
 		Extra: map[string]any{
 			"legacy_id": githubUser.Login, // Store login for migration from old accounts
 		},
 	}, nil
+}
+
+// fetchVerifiedEmail reads the account's email list, the only place GitHub
+// exposes a private address. Failing to read it must not break the login, so
+// every failure degrades to an account without an email.
+func (p *GitHubProvider) fetchVerifiedEmail(ctx context.Context, token *OAuthToken) string {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user/emails", nil)
+	if err != nil {
+		logger.LogWarn(ctx, "[OAuth-GitHub] GetUserEmails request error: %s", err.Error())
+		return ""
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.AccessToken))
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	client := http.Client{
+		Timeout: 20 * time.Second,
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		logger.LogWarn(ctx, "[OAuth-GitHub] GetUserEmails error: %s", err.Error())
+		return ""
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		// 403 here means the token was issued without the user:email scope.
+		logger.LogWarn(ctx, "[OAuth-GitHub] GetUserEmails failed: status=%d", res.StatusCode)
+		return ""
+	}
+
+	var emails []gitHubUserEmail
+	if err := common.DecodeJson(res.Body, &emails); err != nil {
+		logger.LogWarn(ctx, "[OAuth-GitHub] GetUserEmails decode error: %s", err.Error())
+		return ""
+	}
+
+	email := selectGitHubEmail(emails)
+	if email == "" {
+		logger.LogWarn(ctx, "[OAuth-GitHub] GetUserEmails returned no usable address (%d entries)", len(emails))
+	}
+	return email
+}
+
+// selectGitHubEmail picks the address to store for a GitHub account: the
+// primary one, falling back to any other. Unverified addresses are never
+// trusted, because anyone can list an address they do not own, and noreply
+// aliases are skipped because they cannot receive the notification and
+// recovery mail an account address exists for.
+func selectGitHubEmail(emails []gitHubUserEmail) string {
+	fallback := ""
+	for _, entry := range emails {
+		email := strings.TrimSpace(entry.Email)
+		if email == "" || !entry.Verified || isGitHubNoReplyEmail(email) {
+			continue
+		}
+		if entry.Primary {
+			return email
+		}
+		if fallback == "" {
+			fallback = email
+		}
+	}
+	return fallback
+}
+
+func isGitHubNoReplyEmail(email string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(email)), "@users.noreply.github.com")
 }
 
 func (p *GitHubProvider) IsUserIDTaken(providerUserID string) bool {
