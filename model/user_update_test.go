@@ -272,6 +272,62 @@ func TestInsertRejectsDuplicateEmailWithoutUniqueIndex(t *testing.T) {
 	assert.Zero(t, count)
 }
 
+func TestBackfillMissingEmailStoresNormalizedAddressOnlyWhenAbsent(t *testing.T) {
+	setupUserUpdateTestState(t)
+
+	blank := User{
+		Username: "oauth-user",
+		Role:     common.RoleCommonUser,
+		Status:   common.UserStatusEnabled,
+	}
+	require.NoError(t, DB.Create(&blank).Error)
+
+	stored, err := BackfillMissingEmail(blank.Id, " Octocat@Example.COM ")
+	require.NoError(t, err)
+	assert.True(t, stored)
+
+	reloaded, err := GetUserById(blank.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "octocat@example.com", reloaded.Email)
+
+	// A second login must not replace the address the account already carries.
+	stored, err = BackfillMissingEmail(blank.Id, "other@example.com")
+	require.NoError(t, err)
+	assert.False(t, stored)
+
+	reloaded, err = GetUserById(blank.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "octocat@example.com", reloaded.Email)
+}
+
+func TestBackfillMissingEmailRejectsAddressOwnedByAnotherAccount(t *testing.T) {
+	setupUserUpdateTestState(t)
+
+	require.NoError(t, DB.Create(&User{
+		Username: "existing",
+		Password: "old-password",
+		Email:    "taken@example.com",
+		Status:   common.UserStatusEnabled,
+		AffCode:  "existing-aff-code",
+	}).Error)
+
+	blank := User{
+		Username: "oauth-user",
+		Role:     common.RoleCommonUser,
+		Status:   common.UserStatusEnabled,
+		AffCode:  "oauth-aff-code",
+	}
+	require.NoError(t, DB.Create(&blank).Error)
+
+	stored, err := BackfillMissingEmail(blank.Id, "TAKEN@example.com")
+	require.ErrorIs(t, err, ErrEmailAlreadyTaken)
+	assert.False(t, stored)
+
+	reloaded, err := GetUserById(blank.Id, true)
+	require.NoError(t, err)
+	assert.Empty(t, reloaded.Email)
+}
+
 func TestInsertKeepsBlankPasswordForPasswordlessUser(t *testing.T) {
 	setupUserUpdateTestState(t)
 
