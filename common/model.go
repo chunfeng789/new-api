@@ -2,6 +2,9 @@ package common
 
 import "strings"
 
+// ZImagePromptExtendMultiplier is the legacy Ali image request surcharge.
+const ZImagePromptExtendMultiplier = 2
+
 var (
 	// OpenAIResponseOnlyModels is a list of models that are only available for OpenAI responses.
 	OpenAIResponseOnlyModels = []string{
@@ -12,9 +15,20 @@ var (
 	ImageGenerationModels = []string{
 		"dall-e-3",
 		"dall-e-2",
-		// 覆盖整个 gpt-image 系列（gpt-image-1/1-mini/1.5/2/…、chatgpt-image-latest），
-		// 以及 openai/gpt-image-2 这类带命名空间前缀的模型名
+		"prefix:dall-e", // Deprecated upstream models; retained for compatible routes.
 		"gpt-image-",
+		"qwen-image",
+		"z-image",
+		"wan2.7-image-pro",
+		"wan2.7-image",
+		"wan2.6-image",
+		"wan2.6-t2i",
+		"wan2.5-t2i-preview",
+		"wan2.2-t2i-flash",
+		"wan2.2-t2i-plus",
+		"wanx2.1-t2i-turbo",
+		"wanx2.1-t2i-plus",
+		"wanx2.0-t2i-turbo",
 		"prefix:imagen-",
 		"flux-",
 		"flux.1-",
@@ -40,10 +54,13 @@ func IsOpenAIResponseOnlyModel(modelName string) bool {
 func IsImageGenerationModel(modelName string) bool {
 	modelName = strings.ToLower(modelName)
 	for _, m := range ImageGenerationModels {
-		if strings.Contains(modelName, m) {
-			return true
+		if prefix, ok := strings.CutPrefix(m, "prefix:"); ok {
+			if strings.HasPrefix(modelName, prefix) {
+				return true
+			}
+			continue
 		}
-		if strings.HasPrefix(m, "prefix:") && strings.HasPrefix(modelName, strings.TrimPrefix(m, "prefix:")) {
+		if strings.Contains(modelName, m) {
 			return true
 		}
 	}
