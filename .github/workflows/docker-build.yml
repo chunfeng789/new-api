@@ -84,6 +84,12 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
+          # Hashed frontend assets are served from the CDN; index.html stays in the image.
+          # Both arches build identical dist/static, so the upload is idempotent.
+          build-args: |
+            ASSET_PREFIX=${{ vars.ASSET_PREFIX }}
+            TENCENT_SECRET_ID=${{ secrets.TENCENT_SECRET_ID }}
+            TENCENT_SECRET_KEY=${{ secrets.TENCENT_SECRET_KEY }}
           tags: |
             ${{ env.IMAGE_NAME }}:${{ env.TAG }}-${{ matrix.arch }}
             ${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}

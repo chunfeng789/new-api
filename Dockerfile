@@ -5,7 +5,14 @@ COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY ./web ./
 COPY ./VERSION /build/VERSION
-RUN DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun run build
+# Optional CDN offload for hashed assets (dist/static): when ASSET_PREFIX is set the
+# built index.html references that origin, and scripts/upload-cdn.mjs pushes the files
+# to Tencent COS when the secrets are present. These ARGs never reach the final image.
+ARG ASSET_PREFIX
+ARG TENCENT_SECRET_ID
+ARG TENCENT_SECRET_KEY
+RUN DISABLE_ESLINT_PLUGIN='true' ASSET_PREFIX=${ASSET_PREFIX} VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun run build
+RUN ASSET_PREFIX=${ASSET_PREFIX} TENCENT_SECRET_ID=${TENCENT_SECRET_ID} TENCENT_SECRET_KEY=${TENCENT_SECRET_KEY} bun run scripts/upload-cdn.mjs
 
 FROM golang:1.26.1-alpine@sha256:2389ebfa5b7f43eeafbd6be0c3700cc46690ef842ad962f6c5bd6be49ed82039 AS builder2
 ENV GO111MODULE=on CGO_ENABLED=0 GOWORK=off
