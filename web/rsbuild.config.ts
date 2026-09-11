@@ -16,6 +16,9 @@ export default defineConfig(({ envMode }) => {
     'http://localhost:3000'
 
   const isProd = envMode === 'production'
+  // Production builds can serve hashed assets from a CDN (see scripts/upload-cdn.mjs);
+  // index.html and public/ files stay on the origin.
+  const assetPrefix = (isProd && process.env.ASSET_PREFIX) || '/'
   const devProxy = Object.fromEntries(
     (['/api', '/v1', '/mj', '/pg'] as const).map((key) => [
       key,
@@ -71,11 +74,15 @@ export default defineConfig(({ envMode }) => {
       proxy: devProxy,
     },
     output: {
+      assetPrefix,
       // Production optimizations
       minify: isProd,
       target: 'web',
       distPath: {
         root: 'dist',
+        // Rsbuild auto-injects public/favicon.ico with assetPrefix; keep it under
+        // static/ so it is uploaded with the rest of the CDN assets.
+        favicon: 'static',
       },
       // Rely on Rsbuild default legalComments ("linked" → per-chunk *.LICENSE.txt) in all modes.
       // Do not set "none" in production: that strips minifier-preserved third-party notices and
