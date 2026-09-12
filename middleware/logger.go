@@ -34,13 +34,25 @@ func SetUpLogger(server *gin.Engine) {
 		if strings.HasPrefix(path, "/api/oauth/") || strings.HasPrefix(path, "/oauth/") {
 			path, _, _ = strings.Cut(path, "?")
 		}
-		return fmt.Sprintf("[GIN] %s | %s | %s | %3d | %13v | %15s | %7s %s\n",
+		// Behind a reverse proxy the Host header may be rewritten to the backend
+		// address; prefer the first X-Forwarded-Host entry so the log shows the
+		// domain the client actually used.
+		host := ""
+		if param.Request != nil {
+			host = param.Request.Host
+			forwardedHost, _, _ := strings.Cut(param.Request.Header.Get("X-Forwarded-Host"), ",")
+			if forwardedHost = strings.TrimSpace(forwardedHost); forwardedHost != "" {
+				host = forwardedHost
+			}
+		}
+		return fmt.Sprintf("[GIN] %s | %s | %s | %3d | %13v | %15s | %s | %7s %s\n",
 			param.TimeStamp.Format("2006/01/02 - 15:04:05"),
 			tag,
 			requestID,
 			param.StatusCode,
 			param.Latency,
 			param.ClientIP,
+			host,
 			param.Method,
 			path,
 		)
