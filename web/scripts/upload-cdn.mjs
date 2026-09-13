@@ -74,7 +74,11 @@ const files = fs
   .map((entry) => path.join(entry.parentPath, entry.name))
 
 const cos = new COS({ SecretId: secretId, SecretKey: secretKey })
-const concurrency = 16
+// GitHub runners reach ap-shanghai over a thin, jittery link. Too many parallel
+// PUTs starve each stream and COS rejects them with UserNetworkTooSlow (HTTP 400),
+// so keep the fan-out modest and retry transient failures with backoff.
+const concurrency = 8
+const maxAttempts = 5
 let nextIndex = 0
 
 async function uploadWorker() {
@@ -82,13 +86,30 @@ async function uploadWorker() {
     const file = files[nextIndex++]
     const key =
       keyPrefix + path.relative(distDir, file).split(path.sep).join('/')
-    await cos.putObject({
-      Bucket: bucket,
-      Region: region,
-      Key: key,
-      Body: fs.createReadStream(file),
-      CacheControl: 'public, max-age=31536000, immutable',
-    })
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await cos.putObject({
+          Bucket: bucket,
+          Region: region,
+          Key: key,
+          Body: fs.createReadStream(file),
+          CacheControl: 'public, max-age=31536000, immutable',
+        })
+        break
+      } catch (err) {
+        const retryable =
+          !err.statusCode ||
+          err.statusCode >= 500 ||
+          err.code === 'UserNetworkTooSlow' ||
+          err.code === 'RequestTimeout'
+        if (!retryable || attempt >= maxAttempts) throw err
+        const delay = 1000 * 2 ** (attempt - 1)
+        console.warn(
+          `[upload-cdn] ${key} failed (${err.code || err.message}), retry ${attempt}/${maxAttempts - 1} in ${delay}ms`
+        )
+        await new Promise((resolve) => setTimeout(resolve, delay))
+      }
+    }
     console.log(`[upload-cdn] ${key}`)
   }
 }
