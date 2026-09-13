@@ -16,10 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-// Upload the hashed build output (dist/static) to Tencent COS and purge the
-// CDN path, so production pages built with ASSET_PREFIX load their JS/CSS/
-// fonts from the CDN. index.html and public/ files are not uploaded; they are
-// still served by the Go binary.
+// Upload the hashed build output (dist/static) to Tencent COS, so production
+// pages built with ASSET_PREFIX load their JS/CSS/fonts from the CDN.
+// index.html and public/ files are not uploaded; they are still served by the
+// Go binary. Only favicon.ico is purged from the CDN: it is the one unhashed
+// file under static/, everything else gets a new URL per build.
 //
 // Environment:
 //   TENCENT_SECRET_ID / TENCENT_SECRET_KEY  required; skipped when absent
@@ -56,7 +57,7 @@ const region = process.env.CDN_COS_REGION || 'ap-shanghai'
 // Object keys mirror the URL path under the CDN origin so `${ASSET_PREFIX}static/js/x.js`
 // resolves to key `<prefix>/static/js/x.js`.
 const keyPrefix = new URL(assetPrefix).pathname.replace(/^\/+/, '')
-const purgePath = `${assetPrefix.replace(/\/+$/, '')}/static/`
+const purgeUrl = `${assetPrefix.replace(/\/+$/, '')}/static/favicon.ico`
 
 const distDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -122,8 +123,5 @@ console.log(
 const cdnClient = new cdn.v20180606.Client({
   credential: { secretId, secretKey },
 })
-const purge = await cdnClient.PurgePathCache({
-  Paths: [purgePath],
-  FlushType: 'flush',
-})
-console.log(`[upload-cdn] purged ${purgePath} (task ${purge.TaskId})`)
+const purge = await cdnClient.PurgeUrlsCache({ Urls: [purgeUrl] })
+console.log(`[upload-cdn] purged ${purgeUrl} (task ${purge.TaskId})`)
