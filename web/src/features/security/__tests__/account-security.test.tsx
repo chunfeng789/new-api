@@ -17,11 +17,19 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
+import { STATUS_QUERY_KEY } from '@/lib/status-query'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { ChangePasswordDialog } from '../components/dialogs/change-password-dialog'
@@ -36,17 +44,17 @@ vi.mock('@tanstack/react-router', async (importOriginal) => ({
   useNavigate: () => navigate,
 }))
 
-// Dialogs that offer the Passkey verification method mount
-// PasskeyDomainSelector, which reads the status query and therefore needs a
-// QueryClient in the tree.
-function renderWithQueryClient(ui: React.ReactElement) {
-  const client = new QueryClient({
+let client: QueryClient
+beforeEach(() => {
+  client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
-  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>)
-}
+  client.setQueryData(STATUS_QUERY_KEY, { passkey_rp_ids: ['localhost'] })
+})
 
 afterEach(() => {
+  cleanup()
+  client.clear()
   navigate.mockReset()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
@@ -151,8 +159,10 @@ it.each(['2fa', 'passkey'])(
       .mockResolvedValue({ data: { success: true, data: {} } })
     const close = vi.fn()
     const user = userEvent.setup()
-    renderWithQueryClient(
-      <DeleteAccountDialog open username='user' onOpenChange={close} />
+    render(
+      <QueryClientProvider client={client}>
+        <DeleteAccountDialog open username='user' onOpenChange={close} />
+      </QueryClientProvider>
     )
     await user.type(screen.getByRole('textbox'), 'user')
     await user.click(screen.getByRole('button', { name: 'Delete Account' }))
@@ -319,8 +329,10 @@ it('disables 2FA through a Passkey proof without asking for an authenticator cod
   const close = vi.fn()
   const success = vi.fn()
   const user = userEvent.setup()
-  renderWithQueryClient(
-    <TwoFADisableDialog open onOpenChange={close} onSuccess={success} />
+  render(
+    <QueryClientProvider client={client}>
+      <TwoFADisableDialog open onOpenChange={close} onSuccess={success} />
+    </QueryClientProvider>
   )
   await user.click(screen.getByRole('checkbox'))
   await user.click(screen.getByRole('button', { name: 'Disable 2FA' }))
