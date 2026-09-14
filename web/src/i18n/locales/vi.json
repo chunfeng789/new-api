@@ -6522,6 +6522,7 @@
     "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "Chỉ những người dùng được mời đăng ký bằng email kết thúc bằng {{suffixes}} mới nhận được phần thưởng giới thiệu.",
     "To earn the invite reward, register with an email ending in {{suffixes}}.": "Để nhận phần thưởng mời, hãy đăng ký bằng email kết thúc bằng {{suffixes}}.",
     "Default Model": "Mô hình mặc định",
-    "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.": "Được chọn sẵn trong Playground và ví dụ yêu cầu ở trang tổng quan. Nếu để trống hoặc người dùng không dùng được, mô hình đầu tiên trong danh sách của họ sẽ được dùng."
+    "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.": "Được chọn sẵn trong Playground và ví dụ yêu cầu ở trang tổng quan. Nếu để trống hoặc người dùng không dùng được, mô hình đầu tiên trong danh sách của họ sẽ được dùng.",
+    "Select or type a model name": "Chọn hoặc nhập tên mô hình"
   }
 }

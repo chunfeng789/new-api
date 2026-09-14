@@ -6522,6 +6522,7 @@
     "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.",
     "To earn the invite reward, register with an email ending in {{suffixes}}.": "To earn the invite reward, register with an email ending in {{suffixes}}.",
     "Default Model": "Default Model",
-    "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.": "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used."
+    "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.": "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.",
+    "Select or type a model name": "Select or type a model name"
   }
 }

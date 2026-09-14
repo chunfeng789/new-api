@@ -6522,6 +6522,7 @@
     "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "只有使用以 {{suffixes}} 結尾的郵箱註冊的被邀請用戶，才能獲得推薦獎勵。",
     "To earn the invite reward, register with an email ending in {{suffixes}}.": "使用以 {{suffixes}} 結尾的郵箱註冊即可獲得邀請獎勵。",
     "Default Model": "預設模型",
-    "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.": "遊樂場和總覽頁請求範例預設預選的模型。留空或使用者不可用時，使用其模型列表中的第一個。"
+    "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.": "遊樂場和總覽頁請求範例預設預選的模型。留空或使用者不可用時，使用其模型列表中的第一個。",
+    "Select or type a model name": "選擇或輸入模型名稱"
   }
 }

@@ -17,7 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useEffect, useMemo } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -27,6 +28,7 @@ import { JsonCodeEditor } from '@/components/json-code-editor'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Combobox } from '@/components/ui/combobox'
 import {
   Form,
   FormControl,
@@ -39,6 +41,8 @@ import {
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
+import { getEnabledModels } from '@/features/channels/api'
+import { requireServerSuccess } from '@/lib/server-error-message'
 
 import {
   SettingsForm,
@@ -160,6 +164,19 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
 
   const pingEnabled = form.watch('general_setting.ping_interval_enabled')
 
+  const enabledModelsQuery = useQuery({
+    queryKey: ['enabled-models'],
+    queryFn: async () => requireServerSuccess(await getEnabledModels()),
+  })
+  const defaultModelOptions = useMemo(
+    () =>
+      (enabledModelsQuery.data?.data ?? []).map((model) => ({
+        value: model,
+        label: model,
+      })),
+    [enabledModelsQuery.data]
+  )
+
   const onSubmit = async (values: GlobalModelSettingsFormValues) => {
     const flattenedDefaults = flattenGlobalValues(defaultValues)
     const flattenedValues = flattenGlobalValues(values)
@@ -196,14 +213,16 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
               <FormItem>
                 <FormLabel>{t('Default Model')}</FormLabel>
                 <FormControl>
-                  <Input
-                    placeholder='gpt-4o'
+                  <Combobox
+                    options={defaultModelOptions}
+                    allowCustomValue
+                    placeholder={t('Select or type a model name')}
+                    emptyText={t('No model found.')}
                     className='max-w-md'
                     value={field.value ?? ''}
-                    onChange={(event) => field.onChange(event.target.value)}
+                    onValueChange={(value) => field.onChange(value ?? '')}
                     onBlur={field.onBlur}
                     name={field.name}
-                    ref={field.ref}
                   />
                 </FormControl>
                 <FormDescription>

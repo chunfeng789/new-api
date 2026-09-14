@@ -6522,6 +6522,7 @@
     "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "{{suffixes}} で終わるメールで登録した招待ユーザーのみが紹介報酬を獲得できます。",
     "To earn the invite reward, register with an email ending in {{suffixes}}.": "招待報酬を獲得するには、{{suffixes}} で終わるメールで登録してください。",
     "Default Model": "デフォルトモデル",
-    "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.": "Playground と概要ページのリクエスト例で事前選択されるモデル。空またはユーザーが利用できない場合は、モデル一覧の先頭が使用されます。"
+    "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.": "Playground と概要ページのリクエスト例で事前選択されるモデル。空またはユーザーが利用できない場合は、モデル一覧の先頭が使用されます。",
+    "Select or type a model name": "モデル名を選択または入力"
   }
 }

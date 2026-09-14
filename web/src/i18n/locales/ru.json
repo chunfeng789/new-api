@@ -6522,6 +6522,7 @@
     "Only invited users who register with an email ending in {{suffixes}} will earn referral rewards.": "Только приглашённые пользователи, зарегистрировавшиеся с email, оканчивающимся на {{suffixes}}, получат реферальное вознаграждение.",
     "To earn the invite reward, register with an email ending in {{suffixes}}.": "Чтобы получить реферальное вознаграждение, зарегистрируйтесь с email, оканчивающимся на {{suffixes}}.",
     "Default Model": "Модель по умолчанию",
-    "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.": "Предварительно выбирается в Playground и в примере запроса на обзорной странице. Если пусто или недоступно пользователю, используется первая модель из его списка."
+    "Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.": "Предварительно выбирается в Playground и в примере запроса на обзорной странице. Если пусто или недоступно пользователю, используется первая модель из его списка.",
+    "Select or type a model name": "Выберите или введите название модели"
   }
 }
