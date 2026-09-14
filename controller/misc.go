@@ -81,6 +81,7 @@ func GetStatus(c *gin.Context) {
 		"quota_display_type":            operation_setting.GetQuotaDisplayType(),
 		"custom_currency_symbol":        operation_setting.GetGeneralSetting().CustomCurrencySymbol,
 		"custom_currency_exchange_rate": operation_setting.GetGeneralSetting().CustomCurrencyExchangeRate,
+		"default_model":                 operation_setting.GetGeneralSetting().DefaultModel,
 		"enable_batch_update":           common.BatchUpdateEnabled,
 		"enable_drawing":                common.DrawingEnabled,
 		"enable_task":                   common.TaskEnabled,

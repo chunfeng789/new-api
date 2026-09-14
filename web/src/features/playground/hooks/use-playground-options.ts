@@ -40,6 +40,7 @@ import { useTranslation } from 'react-i18next'
 
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
+import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { getUserGroups, getUserModels } from '../api'
 import {
@@ -69,6 +70,9 @@ export function usePlaygroundOptions({
   updateConfig,
 }: UsePlaygroundOptionsParams) {
   const { t } = useTranslation()
+  const adminDefaultModel = useSystemConfigStore(
+    (state) => state.config.defaultModel
+  )
 
   const {
     data: modelsData,
@@ -119,7 +123,11 @@ export function usePlaygroundOptions({
     if (!modelsData) return
 
     setModels(modelsData)
-    const fallback = getModelFallback(modelsData, currentModel)
+    const fallback = getModelFallback(
+      modelsData,
+      currentModel,
+      adminDefaultModel
+    )
 
     if (fallback) {
       updateConfig('model', fallback)
@@ -129,7 +137,7 @@ export function usePlaygroundOptions({
     if (shouldClearModelForGroup(modelsData, currentModel)) {
       updateConfig('model', '')
     }
-  }, [modelsData, currentModel, setModels, updateConfig])
+  }, [modelsData, currentModel, adminDefaultModel, setModels, updateConfig])
 
   useEffect(() => {
     if (!groupsData) return

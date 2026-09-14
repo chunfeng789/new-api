@@ -52,12 +52,14 @@ import { fetchTokenKey, getApiKeys } from '@/features/keys/api'
 import type { ApiKey } from '@/features/keys/types'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { getUserModels } from '@/lib/api'
+import { pickDefaultModel } from '@/lib/default-model'
 import { handleServerError } from '@/lib/handle-server-error'
 import { MOTION_TRANSITION } from '@/lib/motion'
 import { ROLE } from '@/lib/roles'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
+import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import {
   useApiInfo,
@@ -498,6 +500,16 @@ export function OverviewDashboard() {
     },
     staleTime: 5 * 60 * 1000,
   })
+  const adminDefaultModel = useSystemConfigStore(
+    (state) => state.config.defaultModel
+  )
+  const selectedModel = useMemo(
+    () =>
+      modelsQuery.data
+        ? pickDefaultModel(modelsQuery.data, adminDefaultModel)
+        : undefined,
+    [adminDefaultModel, modelsQuery.data]
+  )
 
   const preferredKey = useMemo(
     () => getPreferredKey(apiKeysQuery.data ?? []),
@@ -583,17 +595,17 @@ export function OverviewDashboard() {
       },
       {
         label: t('Model selected'),
-        value: modelsQuery.data?.[0] ?? t('Loading'),
+        value: selectedModel ?? t('Loading'),
         icon: Timer,
         tone: 'chart-4',
       },
     ],
-    [apiInfoItems.length, modelsQuery.data, preferredKey, t]
+    [apiInfoItems.length, preferredKey, selectedModel, t]
   )
 
   const requestExample = useMemo<RequestExample>(() => {
     const endpoint = normalizeEndpoint(apiInfoItems[0]?.url)
-    const model = modelsQuery.data?.[0] ?? 'gpt-4o-mini'
+    const model = selectedModel ?? 'gpt-4o-mini'
     const keyName = preferredKey?.name ?? t('No API key yet')
     const ready = Boolean(preferredKey?.id && model)
 
@@ -607,7 +619,7 @@ export function OverviewDashboard() {
         : 'sk-...',
       ready,
     }
-  }, [apiInfoItems, modelsQuery.data, preferredKey, t])
+  }, [apiInfoItems, preferredKey, selectedModel, t])
 
   const completedStepCount = startSteps.filter((step) => step.completed).length
   const setupComplete = completedStepCount === startSteps.length

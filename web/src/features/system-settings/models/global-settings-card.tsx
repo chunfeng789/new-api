@@ -17,7 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useEffect, useMemo } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -27,6 +28,7 @@ import { JsonCodeEditor } from '@/components/json-code-editor'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Combobox } from '@/components/ui/combobox'
 import {
   Form,
   FormControl,
@@ -39,6 +41,8 @@ import {
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
+import { getEnabledModels } from '@/features/channels/api'
+import { requireServerSuccess } from '@/lib/server-error-message'
 
 import {
   SettingsForm,
@@ -96,6 +100,7 @@ const schema = z.object({
   general_setting: z.object({
     ping_interval_enabled: z.boolean(),
     ping_interval_seconds: z.coerce.number().min(1),
+    default_model: z.string().trim(),
   }),
 })
 
@@ -108,6 +113,7 @@ type FlatGlobalModelSettings = {
   'global.chat_completions_to_responses_policy': string
   'general_setting.ping_interval_enabled': boolean
   'general_setting.ping_interval_seconds': number
+  'general_setting.default_model': string
 }
 
 const flattenGlobalValues = (
@@ -127,6 +133,7 @@ const flattenGlobalValues = (
     values.general_setting.ping_interval_enabled,
   'general_setting.ping_interval_seconds':
     values.general_setting.ping_interval_seconds,
+  'general_setting.default_model': values.general_setting.default_model.trim(),
 })
 
 function normalizeJsonText(value: string, fallback: string) {
@@ -157,6 +164,19 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
 
   const pingEnabled = form.watch('general_setting.ping_interval_enabled')
 
+  const enabledModelsQuery = useQuery({
+    queryKey: ['enabled-models'],
+    queryFn: async () => requireServerSuccess(await getEnabledModels()),
+  })
+  const defaultModelOptions = useMemo(
+    () =>
+      (enabledModelsQuery.data?.data ?? []).map((model) => ({
+        value: model,
+        label: model,
+      })),
+    [enabledModelsQuery.data]
+  )
+
   const onSubmit = async (values: GlobalModelSettingsFormValues) => {
     const flattenedDefaults = flattenGlobalValues(defaultValues)
     const flattenedValues = flattenGlobalValues(values)
@@ -186,6 +206,35 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
             onSave={form.handleSubmit(onSubmit)}
             isSaving={updateOption.isPending}
           />
+          <FormField
+            control={form.control}
+            name='general_setting.default_model'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Default Model')}</FormLabel>
+                <FormControl>
+                  <Combobox
+                    options={defaultModelOptions}
+                    allowCustomValue
+                    placeholder={t('Select or type a model name')}
+                    emptyText={t('No model found.')}
+                    className='max-w-md'
+                    value={field.value ?? ''}
+                    onValueChange={(value) => field.onChange(value ?? '')}
+                    onBlur={field.onBlur}
+                    name={field.name}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
           <FormField
             control={form.control}
             name='global.pass_through_request_enabled'

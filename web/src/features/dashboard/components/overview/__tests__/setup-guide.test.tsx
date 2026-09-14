@@ -36,6 +36,8 @@ import { OverviewDashboard } from '../overview-dashboard'
 const storageKey = 'dashboard_overview_setup_guide_expanded'
 let client: QueryClient
 let keyLookupError: Error | null
+let userModels: string[]
+let adminDefaultModel: string
 
 beforeEach(() => {
   window.localStorage.clear()
@@ -52,6 +54,8 @@ beforeEach(() => {
     defaultOptions: { queries: { retry: false } },
   })
   keyLookupError = null
+  userModels = ['gpt-4o-mini']
+  adminDefaultModel = ''
   vi.spyOn(api, 'get').mockImplementation(async (url) => {
     switch (url) {
       case '/api/token/?p=1&size=10':
@@ -72,11 +76,12 @@ beforeEach(() => {
               announcements_enabled: false,
               faq_enabled: false,
               uptime_kuma_enabled: false,
+              default_model: adminDefaultModel,
             },
           },
         }
       case '/api/user/models':
-        return { data: { success: true, data: ['gpt-4o-mini'] } }
+        return { data: { success: true, data: userModels } }
       case '/api/data/self':
         return { data: { success: true, data: [] } }
       default:
@@ -225,6 +230,29 @@ describe('overview setup guide', () => {
       await screen.findByRole('button', { name: 'Setup guide' })
     ).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText(/Setup progress:/)).not.toBeInTheDocument()
+  })
+
+  it('uses the admin default model in the request example when the user can use it', async () => {
+    const user = userEvent.setup()
+    userModels = ['grok-4.6', 'gpt-4o']
+    adminDefaultModel = 'gpt-4o'
+    await renderOverview()
+
+    await user.click(await screen.findByRole('button', { name: 'Setup guide' }))
+    expect(await screen.findByText('gpt-4o')).toBeVisible()
+    expect(screen.getByText(/"model":"gpt-4o"/)).toBeVisible()
+    expect(screen.queryByText('grok-4.6')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the first available model when the admin default is not usable', async () => {
+    const user = userEvent.setup()
+    userModels = ['grok-4.6', 'gpt-4o']
+    adminDefaultModel = 'claude-sonnet-5'
+    await renderOverview()
+
+    await user.click(await screen.findByRole('button', { name: 'Setup guide' }))
+    expect(await screen.findByText('grok-4.6')).toBeVisible()
+    expect(screen.getByText(/"model":"grok-4.6"/)).toBeVisible()
   })
 
   it('does not show a completed setup entry when the key lookup fails', async () => {

@@ -43,9 +43,10 @@ export const API_ENDPOINTS = {
 // only selected when the backend confirms it is available for the user.
 export const DEFAULT_GROUP = 'default' as const
 
-// Default configuration
+// Default configuration — model is resolved from the admin default and the
+// user's available models once they load (see getModelFallback).
 export const DEFAULT_CONFIG: PlaygroundConfig = {
-  model: 'gpt-4o',
+  model: '',
   group: DEFAULT_GROUP,
   temperature: 0.7,
   top_p: 1,
