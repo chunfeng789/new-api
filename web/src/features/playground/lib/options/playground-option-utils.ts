@@ -16,11 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { pickDefaultModel } from '@/lib/default-model'
+
 import type { GroupOption, ModelOption } from '../../types'
 
 export function getModelFallback(
   models: ModelOption[],
-  currentModel: string
+  currentModel: string,
+  preferredModel?: string
 ): string | null {
   const hasCurrentModel = models.some((model) => model.value === currentModel)
 
@@ -28,7 +31,12 @@ export function getModelFallback(
     return null
   }
 
-  return models[0].value
+  return (
+    pickDefaultModel(
+      models.map((model) => model.value),
+      preferredModel
+    ) ?? null
+  )
 }
 
 export function shouldClearModelForGroup(

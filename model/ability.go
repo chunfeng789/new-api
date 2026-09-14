@@ -43,14 +43,14 @@ func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 func GetGroupEnabledModels(group string) []string {
 	var models []string
 	// Find distinct models
-	DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Pluck("model", &models)
+	DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Order("model").Pluck("model", &models)
 	return models
 }
 
 func GetEnabledModels() []string {
 	var models []string
 	// Find distinct models
-	DB.Table("abilities").Where("enabled = ?", true).Distinct("model").Pluck("model", &models)
+	DB.Table("abilities").Where("enabled = ?", true).Distinct("model").Order("model").Pluck("model", &models)
 	return models
 }
 

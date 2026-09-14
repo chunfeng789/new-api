@@ -44,6 +44,8 @@ export interface SystemConfig {
   footerHtml?: string
   demoSiteEnabled?: boolean
   displayTokenStatEnabled?: boolean
+  /** Admin-configured model to preselect in Playground and request examples */
+  defaultModel?: string
   currency: CurrencyConfig
 }
 

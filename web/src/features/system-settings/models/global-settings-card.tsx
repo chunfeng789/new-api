@@ -96,6 +96,7 @@ const schema = z.object({
   general_setting: z.object({
     ping_interval_enabled: z.boolean(),
     ping_interval_seconds: z.coerce.number().min(1),
+    default_model: z.string().trim(),
   }),
 })
 
@@ -108,6 +109,7 @@ type FlatGlobalModelSettings = {
   'global.chat_completions_to_responses_policy': string
   'general_setting.ping_interval_enabled': boolean
   'general_setting.ping_interval_seconds': number
+  'general_setting.default_model': string
 }
 
 const flattenGlobalValues = (
@@ -127,6 +129,7 @@ const flattenGlobalValues = (
     values.general_setting.ping_interval_enabled,
   'general_setting.ping_interval_seconds':
     values.general_setting.ping_interval_seconds,
+  'general_setting.default_model': values.general_setting.default_model.trim(),
 })
 
 function normalizeJsonText(value: string, fallback: string) {
@@ -186,6 +189,33 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
             onSave={form.handleSubmit(onSubmit)}
             isSaving={updateOption.isPending}
           />
+          <FormField
+            control={form.control}
+            name='general_setting.default_model'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Default Model')}</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder='gpt-4o'
+                    className='max-w-md'
+                    value={field.value ?? ''}
+                    onChange={(event) => field.onChange(event.target.value)}
+                    onBlur={field.onBlur}
+                    name={field.name}
+                    ref={field.ref}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'Preselected in Playground and the overview request example. When empty or unavailable to the user, the first model in their list is used.'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
           <FormField
             control={form.control}
             name='global.pass_through_request_enabled'

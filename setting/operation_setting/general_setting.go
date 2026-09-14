@@ -20,6 +20,8 @@ type GeneralSetting struct {
 	CustomCurrencySymbol string `json:"custom_currency_symbol"`
 	// 自定义货币与美元汇率（1 USD = X Custom）
 	CustomCurrencyExchangeRate float64 `json:"custom_currency_exchange_rate"`
+	// 游乐场与概览页请求示例默认预选的模型，为空时前端回退到用户可用模型列表的第一个
+	DefaultModel string `json:"default_model"`
 }
 
 // 默认配置
