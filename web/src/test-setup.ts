@@ -22,6 +22,12 @@ import i18next from 'i18next'
 import { initReactI18next } from 'react-i18next'
 import { afterEach, beforeAll } from 'vitest'
 
+// The testing-library default of 1000ms for findBy*/waitFor is too tight for
+// this suite on contended CI runners, where a first-in-file test also pays the
+// full cold-render cost. Keep it below vitest's testTimeout so async lookup
+// failures still report the missing element instead of a generic test timeout.
+configure({ asyncUtilTimeout: 5000 })
+
 beforeAll(async () => {
   await i18next.use(initReactI18next).init({
     lng: 'en',
@@ -38,18 +44,18 @@ afterEach(() => {
   cleanup()
 })
 
-// CI runners are several times slower than a developer machine, where the
-// 1s default leaves findBy* queries no room once a render is queued behind
-// other work.
-configure({ asyncUtilTimeout: 5000 })
-
+// Prefer reduced motion in tests: entrance animations write inline
+// `opacity: 0` on their first frame, and jsdom advances frames through a
+// setTimeout-based rAF shim, so jest-dom visibility assertions would race the
+// animation. The reduced-motion code paths render the same DOM without
+// transient hidden states. Both `(prefers-reduced-motion: reduce)` and the
+// boolean `(prefers-reduced-motion)` form match; `no-preference` does not.
 Object.defineProperty(window, 'matchMedia', {
   configurable: true,
-  // Report reduced motion so `motion/react` components render their final
-  // state instead of animating in from `opacity: 0`. Without it, assertions
-  // such as `toBeVisible()` race the animation frames.
   value: (query: string): MediaQueryList => ({
-    matches: query.includes('prefers-reduced-motion'),
+    matches:
+      query.includes('prefers-reduced-motion') &&
+      !query.includes('no-preference'),
     media: query,
     onchange: null,
     addListener: () => undefined,
