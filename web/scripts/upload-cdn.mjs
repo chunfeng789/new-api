@@ -32,6 +32,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import COS from 'cos-nodejs-sdk-v5'
+import mime from 'mime-types'
 import { cdn } from 'tencentcloud-sdk-nodejs-cdn'
 
 const secretId = process.env.TENCENT_SECRET_ID
@@ -74,26 +75,60 @@ const files = fs
   .filter((entry) => entry.isFile())
   .map((entry) => path.join(entry.parentPath, entry.name))
 
-const cos = new COS({ SecretId: secretId, SecretKey: secretKey })
-// GitHub runners reach ap-shanghai over a thin, jittery link. Too many parallel
-// PUTs starve each stream and COS rejects them with UserNetworkTooSlow (HTTP 400),
-// so keep the fan-out modest and retry transient failures with backoff.
+// GitHub runners reach ap-shanghai over a thin, jittery link, at times about
+// 20 KB/s in total. COS rejects a request whose body arrives that slowly with
+// UserNetworkTooSlow (HTTP 400) after a few minutes, which a multi-megabyte
+// chunk sharing the link cannot beat in one PUT. Files above partSize go up as
+// multipart uploads instead, one part at a time, so every request is short and
+// the SDK retries a failed part on its own. The SDK runs at most
+// FileParallelLimit uploads at once, however many workers are waiting.
+const partSize = 1024 * 1024
+const cos = new COS({
+  SecretId: secretId,
+  SecretKey: secretKey,
+  FileParallelLimit: 3,
+  ChunkParallelLimit: 1,
+})
+// Every name under static/ except favicon.ico carries a content hash, so an
+// object already stored under the same key with the same size is this file,
+// left by an earlier release or an earlier attempt of this one. Skipping it
+// lets a rerun send only what is missing and a release only the changed chunks.
+const hashedName = /\.[0-9a-f]{8,}\./
 const concurrency = 8
 const maxAttempts = 5
 let nextIndex = 0
+let skipped = 0
 
 async function uploadWorker() {
   while (nextIndex < files.length) {
     const file = files[nextIndex++]
     const key =
       keyPrefix + path.relative(distDir, file).split(path.sep).join('/')
+    const size = fs.statSync(file).size
+    let stored = false
     for (let attempt = 1; ; attempt++) {
       try {
-        await cos.putObject({
+        if (hashedName.test(path.basename(file))) {
+          const head = await cos
+            .headObject({ Bucket: bucket, Region: region, Key: key })
+            .catch((err) => {
+              // 403: the key may not be granted HeadObject; upload as before.
+              if (err.statusCode === 404 || err.statusCode === 403) return null
+              throw err
+            })
+          stored = Number(head?.headers['content-length']) === size
+        }
+        if (stored) break
+        await cos.uploadFile({
           Bucket: bucket,
           Region: region,
           Key: key,
-          Body: fs.createReadStream(file),
+          FilePath: file,
+          SliceSize: partSize,
+          ChunkSize: partSize,
+          // putObject infers this from the file name; a multipart upload would
+          // be stored without one.
+          ContentType: mime.lookup(file) || 'application/octet-stream',
           CacheControl: 'public, max-age=31536000, immutable',
         })
         break
@@ -111,13 +146,17 @@ async function uploadWorker() {
         await new Promise((resolve) => setTimeout(resolve, delay))
       }
     }
+    if (stored) {
+      skipped++
+      continue
+    }
     console.log(`[upload-cdn] ${key}`)
   }
 }
 
 await Promise.all(Array.from({ length: concurrency }, uploadWorker))
 console.log(
-  `[upload-cdn] uploaded ${files.length} files to ${bucket}/${keyPrefix}static/`
+  `[upload-cdn] uploaded ${files.length - skipped} files to ${bucket}/${keyPrefix}static/, ${skipped} already there`
 )
 
 const cdnClient = new cdn.v20180606.Client({
